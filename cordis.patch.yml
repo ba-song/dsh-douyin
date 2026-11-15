@@ -1,0 +1,28 @@
+# 示例：仅展示 dsh-douyin 的挂载写法，**不写 profile、不自动注册、不触发重启**。
+# 真正挂载由主人/统筹者点头后，在 profile 的 cordis.patch.yml 或 bundles 里加一次。
+# 注意：同一个插件只能注册一次；不要同时写进 bundles 和 profile insert。
+- insert:
+    - id: douyin
+      name: dsh-douyin
+      config:
+        enabled: true
+        transport: ssh-exec
+        sshHost: 127.0.0.1
+        # sshPort: 2222
+        # sshUser: root
+        # sshKeyPath: /root/.dsh/douyin/ssh/id_ed25519
+        # knownHosts: /root/.dsh/douyin/known_hosts
+        #
+        # 限流（默认值，确认后可不写）
+        # dailyQuota: 40
+        # perSession: 8
+        # sessionGapMs: 1800000
+        # minIntervalMs: 5000
+        # minWatchMs: 10000
+        # searchRetries: 1
+        # blockAssets: false
+        #
+        # 截图目录与审计（默认值）
+        # screenshotDir: /sdcard/DSHA/媒体/抖音
+        # downloadDir: /sdcard/DSHA/媒体/抖音/下载
+        # auditFile: /root/.dsh/douyin/douyin_audit.jsonl

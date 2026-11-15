@@ -1,0 +1,333 @@
+/**
+ * dsh-douyin 配置：默认值 + 容错归一化。
+ *
+ * 设计约束（主人 2026-11-07 特别提醒）：
+ * - 纯函数：不读文件、不连 SSH、不起子进程、不注册定时器；apply 调用它也是零副作用。
+ * - 非法值一律回落到默认值并记 warnings，绝不 throw —— 错误配置不能把宿主搞崩。
+ *
+ * 时段（Asia/Shanghai，固定 UTC+8，无夏令时）：
+ * - 工作日 08:00–09:00、12:00–14:00、18:00–次日 09:00；
+ * - 周末全天；
+ * - 00:00–08:00 是她的静默时段，优先级最高，对所有日期生效。
+ * 归一化后 timeWindows 是“分钟区间”数组：[startMinute, endMinute]，end 可为 1440。
+ */
+
+export const DEFAULT_TIME_WINDOWS = Object.freeze({
+  weekday: Object.freeze(['08:00-09:00', '12:00-14:00', '18:00-24:00']),
+  weekend: Object.freeze(['00:00-24:00']),
+  silence: Object.freeze(['00:00-08:00']),
+})
+
+export const DEFAULTS = Object.freeze({
+  // 总开关；关掉后所有工具返回 E_DISABLED（仍注册，便于排障）
+  enabled: true,
+
+  // 传输：v1 只用 ssh-exec；streamlocal 只保留占位接口
+  transport: 'ssh-exec',
+  sshHost: '127.0.0.1',
+  sshPort: 2222,
+  sshUser: 'root',
+  sshKeyPath: '/root/.dsh/douyin/ssh/id_ed25519',
+  knownHosts: '/root/.dsh/douyin/known_hosts',
+
+  // 远程桥：固定命令白名单客户端（一行 JSON 进、一行 JSON 出）
+  remoteNodeDir: '/manager/extensions/harness/program/node/bin',
+  remoteClient: '/persistent/cdp/client-stdin.js',
+  shotsDir: '/persistent/cdp/shots',
+
+  // 超时：open 120s，其余 30s
+  openTimeoutMs: 120000,
+  callTimeoutMs: 30000,
+
+  // 限流（条数 = 成功打开/展示的视频/搜索结果）
+  dailyQuota: 40,
+  perSession: 8,
+  sessionGapMs: 30 * 60 * 1000,
+  minIntervalMs: 5000,
+  maxQueue: 8,
+
+  // 时段与审计
+  tzOffsetMinutes: 480,
+  timeWindows: DEFAULT_TIME_WINDOWS,
+
+  // 抖音页面
+  homeUrl: 'https://www.douyin.com/',
+  loginSelector: '[id^="login-full-panel"]',
+  feedSelector: 'div.waterfall-videoCardContainer',
+  searchSelector: 'div.search-result-card',
+  commentSelectors: Object.freeze([
+    '[data-e2e="comment-item"]',
+    'div.comment-item',
+    'div[data-e2e="comment-list"] > div',
+  ]),
+  textLen: 60,
+  commentTextLen: 200,
+  // 评论页是懒加载：打开视频后最多等 8 次 × 1.5s
+  commentWaitMs: 1500,
+  commentRetries: 12,
+  // 评论区往下滚加载更多
+  commentScrollSteps: 3,
+  commentScrollDelta: 700,
+  commentScrollWaitMs: 800,
+  // 推荐流往下刷：scroll=true 时最多 3 次，每次滚 700px、等 800ms
+  feedScrollDelta: 700,
+  feedScrollWaitMs: 800,
+  feedScrollMaxSteps: 3,
+  // 搜索页等可见卡片：初始检查 + 最多 3 次重试，每次 1s
+  searchCardWaitMs: 1500,
+  searchCardRetries: 12,
+  // 搜索整体失败后最多重试 1 次（仅对选择器/超时/远程 IO 类错误）
+  searchRetries: 1,
+  // 可选：进 feed/search 前让远程桥拦截 image/font/media（默认关；开启后截图封面会空）
+  blockAssets: false,
+  // 只有“真的看了 ≥10 秒”的视频才计数（open 记 activeWatch，下一次浏览工具调用结算）
+  minWatchMs: 10000,
+
+  // 截图：远程路径校验 + 本地落盘
+  screenshotDir: '/sdcard/DSHA/媒体/抖音',
+  maxScreenshotBytes: 2 * 1024 * 1024,
+
+  // 本地审计（只记 时间/命令/条数/ok/error，不记页面正文/cookie）
+  auditFile: '/root/.dsh/douyin/douyin_audit.jsonl',
+  maxAuditBytes: 5 * 1024 * 1024,
+
+  // owner/home 门禁（与 dsh-autonomy 的 isOwnerContext 同口径）
+  homeCwd: '/sdcard/DSHA/生活/数据/home',
+  ownerPrivateDirs: Object.freeze([]),
+
+  // 供后续生活插件调用；默认不 provide，避免与未来同名服务冲突
+  exposeService: false,
+})
+
+const HOST_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]*[A-Za-z0-9])?$/
+const USER_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/
+const REMOTE_PATH_RE = /^\/[A-Za-z0-9._/-]+$/
+const SELECTOR_RE = /^[^\n\r\u0000-\u001f]{1,200}$/
+
+const isPlainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v)
+
+function asString(value, fallback, { max = 240, re = null } = {}) {
+  if (typeof value !== 'string') return fallback
+  const s = value.trim()
+  if (!s || s.length > max) return fallback
+  if (re && !re.test(s)) return fallback
+  return s
+}
+
+/** 远程绝对路径：禁止 .. 段（避免 node 执行到非预期脚本） */
+function asRemotePath(value, fallback) {
+  const s = asString(value, fallback, { max: 300, re: REMOTE_PATH_RE })
+  if (s.split('/').includes('..')) return fallback
+  return s
+}
+
+function asInt(value, fallback, min, max) {
+  const n = Number(value)
+  if (!Number.isInteger(n) || n < min || n > max) return fallback
+  return n
+}
+
+function asBool(value, fallback) {
+  return typeof value === 'boolean' ? value : fallback
+}
+
+/** "HH:MM-HH:MM" → [start, end] 分钟；24:00 合法；起止相同视为非法 */
+export function parseMinuteRange(text) {
+  if (typeof text !== 'string') return null
+  const m = text.trim().match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/)
+  if (!m) return null
+  const a = Number(m[1]) * 60 + Number(m[2])
+  const b = Number(m[3]) * 60 + Number(m[4])
+  if (!Number.isInteger(a) || !Number.isInteger(b)) return null
+  if (a < 0 || a > 1440 || b < 0 || b > 1440) return null
+  if (a === b) return null
+  return [a, b]
+}
+
+function normalizeRangeList(input, fallback, warnings, label) {
+  if (input === undefined || input === null) return fallback.map(parseMinuteRange).filter(Boolean)
+  const arr = Array.isArray(input)
+    ? input
+    : typeof input === 'string'
+      ? input.split(',')
+      : null
+  if (!arr) {
+    warnings.push(`timeWindows.${label} 不是数组/字符串，使用默认值`)
+    return fallback.map(parseMinuteRange).filter(Boolean)
+  }
+  if (arr.length === 0) return [] // 显式空数组 = 该组不限（silence 可用于关闭静默）
+  const out = arr.map(parseMinuteRange).filter(Boolean)
+  if (!out.length) {
+    warnings.push(`timeWindows.${label} 没有合法区间（HH:MM-HH:MM），使用默认值`)
+    return fallback.map(parseMinuteRange).filter(Boolean)
+  }
+  return out
+}
+
+/**
+ * timeWindows 支持三种写法：
+ * 1) 对象 {weekday:[...], weekend:[...], silence:[...]}
+ * 2) 字符串/数组：工作日与周末共用同一组，静默用默认
+ * 3) 缺省：默认时段
+ */
+export function normalizeTimeWindows(raw, warnings = []) {
+  const fallback = DEFAULT_TIME_WINDOWS
+  if (raw === undefined || raw === null) {
+    return {
+      weekday: normalizeRangeList(undefined, fallback.weekday, warnings, 'weekday'),
+      weekend: normalizeRangeList(undefined, fallback.weekend, warnings, 'weekend'),
+      silence: normalizeRangeList(undefined, fallback.silence, warnings, 'silence'),
+    }
+  }
+  if (typeof raw === 'string' || Array.isArray(raw)) {
+    const shared = normalizeRangeList(raw, fallback.weekday, warnings, 'shared')
+    return {
+      weekday: shared,
+      weekend: shared,
+      silence: normalizeRangeList(undefined, fallback.silence, warnings, 'silence'),
+    }
+  }
+  if (!isPlainObject(raw)) {
+    warnings.push('timeWindows 类型不正确，使用默认值')
+  }
+  const obj = isPlainObject(raw) ? raw : {}
+  return {
+    weekday: normalizeRangeList(obj.weekday, fallback.weekday, warnings, 'weekday'),
+    weekend: normalizeRangeList(obj.weekend, fallback.weekend, warnings, 'weekend'),
+    silence: normalizeRangeList(obj.silence, fallback.silence, warnings, 'silence'),
+  }
+}
+
+function normalizeSelectors(raw, warnings) {
+  if (raw === undefined || raw === null) return [...DEFAULTS.commentSelectors]
+  const arr = Array.isArray(raw) ? raw : []
+  const out = arr
+    .map((x) => (typeof x === 'string' ? x.trim() : ''))
+    .filter((x) => SELECTOR_RE.test(x))
+    .slice(0, 6)
+  if (!out.length) {
+    warnings.push('commentSelectors 为空/非法，使用默认（未验证）选择器')
+    return [...DEFAULTS.commentSelectors]
+  }
+  return out
+}
+
+function normalizeHomeUrl(value, warnings) {
+  if (value === undefined || value === null) return DEFAULTS.homeUrl
+  const s = asString(value, '', { max: 300 })
+  try {
+    const u = new URL(s)
+    if (u.protocol === 'https:' && ['www.douyin.com', 'douyin.com', 'm.douyin.com'].includes(u.hostname)) {
+      return u.href
+    }
+  } catch {
+    // fallthrough
+  }
+  warnings.push('homeUrl 不是 douyin.com 的 https 地址，使用默认值')
+  return DEFAULTS.homeUrl
+}
+
+function normalizeDirs(raw, warnings) {
+  if (raw === undefined || raw === null) return []
+  if (!Array.isArray(raw)) {
+    warnings.push('ownerPrivateDirs 不是数组，忽略')
+    return []
+  }
+  return raw
+    .map((x) => (typeof x === 'string' ? x.trim() : ''))
+    .filter((x) => x.startsWith('/') && x.length <= 300)
+    .map((x) => x.replace(/\/+$/, ''))
+    .filter(Boolean)
+    .slice(0, 20)
+}
+
+/**
+ * 归一化配置。永不 throw；非法项回落默认值并写入 warnings。
+ * @param {unknown} raw
+ * @returns {ReturnType<typeof DEFAULTS> & {warnings: string[]}}
+ */
+export function normalizeConfig(raw) {
+  const warnings = []
+  const r = isPlainObject(raw) ? raw : {}
+
+  const transportRaw = typeof r.transport === 'string' ? r.transport.trim() : ''
+  let transport = DEFAULTS.transport
+  if (transportRaw === 'ssh-exec' || transportRaw === 'streamlocal') transport = transportRaw
+  else if (transportRaw) warnings.push(`transport=${transportRaw} 不支持，回落到 ssh-exec`)
+
+  const homeUrl = normalizeHomeUrl(r.homeUrl, warnings)
+  const timeWindows = normalizeTimeWindows(r.timeWindows, warnings)
+
+  const cfg = {
+    ...DEFAULTS,
+    enabled: asBool(r.enabled, DEFAULTS.enabled),
+    transport,
+
+    sshHost: asString(r.sshHost, DEFAULTS.sshHost, { max: 200, re: HOST_RE }),
+    sshPort: asInt(r.sshPort, DEFAULTS.sshPort, 1, 65535),
+    sshUser: asString(r.sshUser, DEFAULTS.sshUser, { max: 64, re: USER_RE }),
+    sshKeyPath: asString(r.sshKeyPath, DEFAULTS.sshKeyPath, { max: 300 }),
+    knownHosts: asString(r.knownHosts, DEFAULTS.knownHosts, { max: 300 }),
+
+    remoteNodeDir: asRemotePath(r.remoteNodeDir, DEFAULTS.remoteNodeDir),
+    remoteClient: asRemotePath(r.remoteClient, DEFAULTS.remoteClient),
+    shotsDir: asRemotePath(r.shotsDir, DEFAULTS.shotsDir),
+
+    openTimeoutMs: asInt(r.openTimeoutMs, DEFAULTS.openTimeoutMs, 1000, 300000),
+    callTimeoutMs: asInt(r.callTimeoutMs, DEFAULTS.callTimeoutMs, 1000, 120000),
+
+    dailyQuota: asInt(r.dailyQuota, DEFAULTS.dailyQuota, 1, 100),
+    perSession: asInt(r.perSession, DEFAULTS.perSession, 1, 20),
+    sessionGapMs: asInt(r.sessionGapMs, DEFAULTS.sessionGapMs, 60000, 24 * 60 * 60 * 1000),
+    minIntervalMs: asInt(r.minIntervalMs, DEFAULTS.minIntervalMs, 0, 600000),
+    maxQueue: asInt(r.maxQueue, DEFAULTS.maxQueue, 1, 32),
+
+    tzOffsetMinutes: asInt(r.tzOffsetMinutes, DEFAULTS.tzOffsetMinutes, -720, 840),
+    timeWindows,
+
+    homeUrl,
+    loginSelector: asString(r.loginSelector, DEFAULTS.loginSelector, { max: 200, re: SELECTOR_RE }),
+    feedSelector: asString(r.feedSelector, DEFAULTS.feedSelector, { max: 200, re: SELECTOR_RE }),
+    searchSelector: asString(r.searchSelector, DEFAULTS.searchSelector, { max: 200, re: SELECTOR_RE }),
+    commentSelectors: normalizeSelectors(r.commentSelectors, warnings),
+    textLen: asInt(r.textLen, DEFAULTS.textLen, 20, 500),
+    commentTextLen: asInt(r.commentTextLen, DEFAULTS.commentTextLen, 20, 1000),
+    feedScrollDelta: asInt(r.feedScrollDelta, DEFAULTS.feedScrollDelta, 1, 10000),
+    feedScrollWaitMs: asInt(r.feedScrollWaitMs, DEFAULTS.feedScrollWaitMs, 0, 10000),
+    feedScrollMaxSteps: asInt(r.feedScrollMaxSteps, DEFAULTS.feedScrollMaxSteps, 1, 10),
+    searchCardWaitMs: asInt(r.searchCardWaitMs, DEFAULTS.searchCardWaitMs, 0, 10000),
+    searchCardRetries: asInt(r.searchCardRetries, DEFAULTS.searchCardRetries, 1, 10),
+    commentWaitMs: asInt(r.commentWaitMs, DEFAULTS.commentWaitMs, 0, 10000),
+    commentRetries: asInt(r.commentRetries, DEFAULTS.commentRetries, 0, 30),
+    commentScrollSteps: asInt(r.commentScrollSteps, DEFAULTS.commentScrollSteps, 0, 10),
+    commentScrollDelta: asInt(r.commentScrollDelta, DEFAULTS.commentScrollDelta, 100, 2000),
+    commentScrollWaitMs: asInt(r.commentScrollWaitMs, DEFAULTS.commentScrollWaitMs, 0, 10000),
+    searchRetries: asInt(r.searchRetries, DEFAULTS.searchRetries, 0, 1),
+    blockAssets: asBool(r.blockAssets, DEFAULTS.blockAssets),
+    minWatchMs: asInt(r.minWatchMs, DEFAULTS.minWatchMs, 0, 600000),
+
+    screenshotDir: asString(r.screenshotDir, DEFAULTS.screenshotDir, { max: 300 }),
+    maxScreenshotBytes: asInt(r.maxScreenshotBytes, DEFAULTS.maxScreenshotBytes, 64 * 1024, 16 * 1024 * 1024),
+
+    auditFile: asString(r.auditFile, DEFAULTS.auditFile, { max: 300 }),
+    maxAuditBytes: asInt(r.maxAuditBytes, DEFAULTS.maxAuditBytes, 1024 * 1024, 50 * 1024 * 1024),
+
+    homeCwd: asString(r.homeCwd, DEFAULTS.homeCwd, { max: 300 }),
+    ownerPrivateDirs: normalizeDirs(r.ownerPrivateDirs, warnings),
+    exposeService: asBool(r.exposeService, DEFAULTS.exposeService),
+
+    warnings,
+  }
+
+  // 截图目录必须是绝对路径（不强制存在；首次落盘时才 mkdir）
+  if (!cfg.screenshotDir.startsWith('/')) {
+    warnings.push('screenshotDir 不是绝对路径，使用默认值')
+    cfg.screenshotDir = DEFAULTS.screenshotDir
+  }
+  if (!cfg.sshKeyPath.startsWith('/')) cfg.sshKeyPath = DEFAULTS.sshKeyPath
+  if (!cfg.knownHosts.startsWith('/')) cfg.knownHosts = DEFAULTS.knownHosts
+  if (!cfg.auditFile.startsWith('/')) cfg.auditFile = DEFAULTS.auditFile
+  if (!cfg.homeCwd.startsWith('/')) cfg.homeCwd = DEFAULTS.homeCwd
+
+  return cfg
+}
