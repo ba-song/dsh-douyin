@@ -107,6 +107,25 @@ const CDP_TYPE = { image: 'Image', font: 'Font', media: 'Media' };
 const assetStateByRole = new Map();
 /** CDP Fetch 会话按 role 独立 */
 const cdpSessionByRole = new Map();
+/** 已崩溃的 Page（WeakSet：page.isClosed() 在 renderer 崩溃时仍为 false，必须单独记） */
+const crashedPages = new WeakSet();
+/** 挂过生命周期的 Page（防重复挂） */
+const watchedPages = new WeakSet();
+/** role -> 崩溃时间戳（page.on('crash') 写入；health 直接读缓存，不再 evaluate） */
+const crashedAtByRole = new Map();
+/** role -> 崩溃瞬间的 url/title 快照（崩溃后不能 evaluate 取 title，只能回缓存） */
+const crashedInfoByRole = new Map();
+/** role -> 最近一次成功读到的 title（崩溃快照的兜底） */
+const lastTitleByRole = new Map();
+/** 与 Set 同款接口，方便按契约写法 add/has/delete */
+const crashedRoles = {
+  add: (role) => crashedAtByRole.set(role, Date.now()),
+  has: (role) => crashedAtByRole.has(role),
+  delete: (role) => crashedAtByRole.delete(role),
+  keys: () => [...crashedAtByRole.keys()],
+  clear: () => crashedAtByRole.clear(),
+  at: (role) => crashedAtByRole.get(role) || 0,
+};
 
 function nowIso() { return new Date().toISOString(); }
 
@@ -171,7 +190,85 @@ function browserAlive() {
 }
 
 function pageAlive(p) {
-  try { return Boolean(p && !p.isClosed()); } catch { return false; }
+  try { return Boolean(p && !p.isClosed() && !crashedPages.has(p)); } catch { return false; }
+}
+
+/** 同步取 url（page.url() 读主 frame 的缓存 URL，renderer 崩了也能取，不走 evaluate） */
+function safeUrl(p) {
+  try { return p ? String(p.url() || '') : ''; } catch { return ''; }
+}
+
+/**
+ * 给任意 promise 套一个"到点就返回 fallback"的短上限。
+ * 不取消原 promise，但两个分支都挂了 handler，不会产生 unhandledRejection。
+ */
+function withDeadline(promise, ms, fallback) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => { done = true; resolve(fallback); }, ms);
+    Promise.resolve(promise).then(
+      (value) => { if (!done) { clearTimeout(timer); resolve(value); } },
+      (error) => { if (!done) { clearTimeout(timer); reject(error); } },
+    );
+  });
+}
+
+/** 短上限取 title：比 pageTitle（3s）快，崩溃/超时都退化成空串 */
+async function pageTitleFast(p, ms = TITLE_FAST_TIMEOUT) {
+  try {
+    const title = await withDeadline(p.title(), ms, '');
+    const text = String(title || '');
+    return text;
+  } catch {
+    return '';
+  }
+}
+
+/** 短上限取 readyState；取不到返回空串（调用方自己决定降级） */
+async function pageReadyState(p, ms = READYSTATE_TIMEOUT) {
+  try {
+    return String(await withDeadline(p.evaluate(() => document.readyState), ms, '') || '');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 崩溃/关闭监听（协议 v2 §A8）：
+ * - crash → 日志 + 从 pageByRole 摘掉 + 记 crashedRoles + close()，下次 ensureRolePage 自然重建；
+ * - close → 只在映射仍指向该页时摘掉（避免误删新页）。
+ * 每个 Page 只挂一次（WeakSet），重复注册不叠加。
+ */
+function watchPageLifecycle(p, role) {
+  try {
+    if (!p || watchedPages.has(p)) return p;
+    watchedPages.add(p);
+    p.on('crash', () => {
+      crashedPages.add(p);
+      crashedRoles.add(role);
+      crashedInfoByRole.set(role, { url: safeUrl(p), title: lastTitleByRole.get(role) || '', at: crashedRoles.at(role) });
+      if (pageByRole.get(role) === p) pageByRole.delete(role);
+      log(`role=${role} page CRASHED url=${safeUrl(p)} (dropped from pageByRole)`);
+      try { p.close().catch(() => {}); } catch {}
+    });
+    p.on('close', () => {
+      if (pageByRole.get(role) === p) pageByRole.delete(role);
+      log(`role=${role} page closed url=${safeUrl(p)}`);
+    });
+  } catch (error) {
+    log(`watch lifecycle ${role}: ${String(error && error.message || error).slice(0, 160)}`);
+  }
+  return p;
+}
+
+/** 统一登记 role page：映射 + 生命周期监听 + 清掉该 role 的旧崩溃标记 */
+function registerRolePage(role, p) {
+  pageByRole.set(role, p);
+  roleByPage.set(p, role);
+  crashedRoles.delete(role);
+  crashedInfoByRole.delete(role);
+  watchPageLifecycle(p, role);
+  return p;
 }
 
 /** 解析请求里的 role / pageRole；缺省 main，未知 role 明确报错。 */
@@ -376,10 +473,23 @@ async function launchBrowser() {
     context = externalBrowser.contexts()[0] || await externalBrowser.newContext();
     context.setDefaultTimeout(30000);
     context.setDefaultNavigationTimeout(60000);
+    // 协议 v2 §A8：context 关闭清理 role 映射（下次 ensureBrowser 重建）
+    try {
+      context.on('close', () => {
+        log('context closed: clearing role pages');
+        pageByRole.clear();
+        cdpSessionByRole.clear();
+        assetStateByRole.clear();
+        crashedRoles.clear();
+        crashedInfoByRole.clear();
+        lastTitleByRole.clear();
+      });
+    } catch (error) {
+      log(`context close listener: ${String(error && error.message || error).slice(0, 160)}`);
+    }
     const pages = context.pages();
     const main = pages[0] || await context.newPage();
-    pageByRole.set('main', main);
-    roleByPage.set(main, 'main');
+    registerRolePage('main', main);
     if (START_URL) {
       try {
         await gotoPage(main, START_URL);
@@ -393,8 +503,7 @@ async function launchBrowser() {
     for (const role of ['notify', 'dm']) {
       try {
         const p = await context.newPage();
-        pageByRole.set(role, p);
-        roleByPage.set(p, role);
+        registerRolePage(role, p);
         await attachMute(p);
         if (role !== 'main') {
           // 后台角色页不允许播放视频：重写 play()、监听 play 事件、1 秒巡检
