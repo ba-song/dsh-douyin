@@ -1471,16 +1471,6 @@ async function cmdScroll(req) {
   return { dy };
 }
 
-const PRESS_KEYS = new Set(['Escape', 'Enter', 'ArrowDown', 'ArrowUp']);
-async function cmdPress(req) {
-  const role = roleOfRequest(req);
-  const p = await ensureRolePage(role);
-  const key = String(req.key || '');
-  if (!PRESS_KEYS.has(key)) throw Object.assign(new Error(`E_BAD_KEY: ${key}`), { code: 'E_BAD_KEY' });
-  await p.keyboard.press(key);
-  return true;
-}
-
 async function cmdScreenshot(req) {
   const role = roleOfRequest(req);
   const p = await ensureRolePage(role);
