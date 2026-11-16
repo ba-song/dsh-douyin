@@ -1701,5 +1701,55 @@ process.on('unhandledRejection', (error) => {
   log(`unhandledRejection: ${String(error && error.stack || error).slice(0, 800)}`);
 });
 
-void main();
+// 只在被当作主模块直接运行时启动服务；被测试 require/import 时只导出纯函数，不碰 socket/浏览器。
+if (require.main === module) {
+  void main();
+}
+
+/**
+ * 测试出口（不启动浏览器）：tests/bridge-protocol.test.mjs 只断言这些纯函数。
+ * 生产路径（node cdp-bridge.js）行为不变。
+ */
+module.exports.__test = {
+  codeError,
+  clampInt,
+  selectorOk,
+  validateSelector,
+  validatePatterns,
+  normalizeProbeCounts,
+  normalizeWaitState,
+  normalizeUrlForCompare,
+  normalizeDouyinUrl,
+  validateTypeText,
+  validateKeysText,
+  normalizeTypeMode,
+  normalizeNth,
+  normalizePressKey,
+  isEditableDescriptor,
+  isPlaywrightTimeout,
+  charCount,
+  constants: {
+    CAPABILITIES,
+    COMMANDS,
+    LIMITS,
+    PRESS_NAMED_KEYS,
+    PRESS_HOTKEY_CHARS,
+    TYPE_MODES,
+    TYPE_MAX_CHARS,
+    WAIT_STATES,
+    WAIT_TIMEOUT_MIN,
+    WAIT_TIMEOUT_MAX,
+    WAIT_TIMEOUT_DEFAULT,
+    CLICK_TIMEOUT_DEFAULT,
+    CLICK_TIMEOUT_FORCE_DEFAULT,
+    CLICK_TIMEOUT_MIN,
+    CLICK_TIMEOUT_MAX,
+    CLICK_SCROLL_TIMEOUT,
+    NET_PATTERN_RE,
+    NET_MAX_PATTERNS,
+    NET_MAX_EVENTS,
+    SELECTOR_MAX_LEN,
+    HEALTH_EVAL_TIMEOUT,
+  },
+};
 
