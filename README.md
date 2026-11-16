@@ -376,3 +376,45 @@ npm test        # node --test tests/*.test.mjs（不真连 SSH）
   唯一命中发送图标（class 从 `wchsYBpK` 变 `wchsYBpK jfGCpJo0`），随后已清空草稿；未点发送。
 - 真机安全门：随后评论/视频页出现短信验证浮层（`[class*="verify_sms"]` 计数 6），like dryRun 与
   comment draft 实测均返回 `E_LOGIN_REQUIRED`，不输入/不点击；真实写未执行。
+
+## 2026-11-16 读写稳定性 / 性能优化（桥协议 v2）
+
+> 背景：bridge.log 实测 `click ok` 平均 2,214ms（5,835 次里 **0 次 <100ms**）、notify tab 崩溃后
+> 20,276 次 `Target crashed` 空转 5 小时、用户写操作要排在两个 3s watcher 后面（p95 排队 1,305ms）。
+> 本次按「协议 v2」改造桥 + 插件，全部有实测证据（见 `/sdcard/DSHA/工作区/团队/2026-11-16-抖音优化/`）。
+
+### 桥新命令（`/persistent/cdp/cdp-bridge.js`，capability 见 `ping.capabilities`）
+| 命令 | 用途 |
+|---|---|
+| `health` | 每个 role 的 `{url,title,renderer:'ok'\|'crashed'\|'closed'\|'unknown'}`；**不进串行队列**，p95 有保证 |
+| `probe` | 一次往返拿 `url/title/readyState` + ≤8 个 selector 的 count + 一次 list（替代 4–6 次往返） |
+| `waitFor` | `{selector,state,timeoutMs}` → `{matched,ms}`，替代 20×`count` 轮询 |
+| `netArm`/`netTake` | 固定包装 fetch+XHR，只记 `url/method/status/seq`（不存 body），写操作等接口响应用 |
+| `type` | 桥内文本输入（`fill`/`insert`/`keys`），**中文不再依赖 X11 剪贴板/xdotool** |
+| `press` | 白名单加 `z/c/x`；输入框聚焦时返回 `E_INPUT_FOCUSED`（`allowFocused:true` 仅提交/关面板用） |
+
+### 行为变化
+- **崩溃自愈**：每个 role page 挂 `page.on('crash')`，崩溃页立即摘出映射并 close，下次 `ensureRolePage` 重建；
+  `context.on('close')` 清理映射。watcher 连续失败走**指数退避 3s→6s…60s + 熔断**（12 次/冷却 5 分钟）。
+- **队列分道**：`userQueue`（工具）与 `watchQueue`（watcher 原语，深度 1）分开，用户调用不再排在 watcher 后面；
+  `service.queueStats()` 暴露深度与 `retryAfterMs`。
+- **写路径**：`openForWrite` 一次 `probe`；写后回读改轮询（120ms/1.6s，状态一变立即返回）；
+  `inputMode=auto` 改为**桥内快捷键优先 → click 兜底 → X11 兜底**；文本输入桥内 `type` 优先。
+- **错误码**：新增 `E_EXECUTION_UNKNOWN`（动作已发出但结果读不到；**先查真实状态，绝不自动重放**）。
+- **watcher 面板**：`notifyWatchSource=panel` 不再每 tick 开关面板，改为 trigger 优先 + `notifyPanelPollMs`（默认 60s）节流。
+
+### 新增配置（均有默认值）
+`clickTimeoutMs=3000`、`clickScrollTimeoutMs=600`、`openReuse=true`、`probeEnabled=true`、`waitForTimeoutMs=2500`、
+`writeVerifyPollMs=120`、`writeVerifyTimeoutMs=1600`、`toggleReadRetries=4`、`toggleReadWaitMs=150`、
+`netVerifyEnabled=true`、`netVerifyTimeoutMs=1500`、`notifyPanelPollMs=60000`、
+`watchBackoffMinMs=3000`、`watchBackoffMaxMs=60000`、`watchBackoffFactor=2`、
+`watchBreakerFails=12`、`watchBreakerCooldownMs=300000`。
+
+### 部署
+```bash
+# 桥（会短暂关闭远程 Chromium 窗口，需主人同意后执行）
+DRY_RUN=1 bash /root/.dsh/plugin-src/dsh-douyin/bridge/deploy.sh
+bash /root/.dsh/plugin-src/dsh-douyin/bridge/deploy.sh
+bash /root/.dsh/plugin-src/dsh-douyin/bridge/restart.sh   # 见 bridge-report.md §6
+# 插件：主人手动重启 DSH App（profile 未改；插件代码已同步）
+```
