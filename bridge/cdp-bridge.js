@@ -711,14 +711,38 @@ function clampInt(value, min, max, fallback) {
   return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
+/**
+ * 协议 v2 §A7：
+ * - reuse=true（默认）且目标 URL 与当前 URL 归一化相等（忽略 hash/末尾 `/`）→ 不导航，直接返回 reused；
+ * - 删掉固定 waitForTimeout(1000)，改 readyState 条件等待（800ms 上限）；
+ * - title 为空再等 500ms 取一次；整体目标 p50 ≤ 2s（真导航除外）。
+ */
 async function cmdOpen(req) {
   const role = roleOfRequest(req);
   const url = normalizeDouyinUrl(req.url);
   const p = await ensureRolePage(role);
+  const reuse = req.reuse !== false;
+  if (reuse) {
+    const current = safeUrl(p);
+    if (current && normalizeUrlForCompare(current) === normalizeUrlForCompare(url)) {
+      const title = await pageTitleFast(p);
+      if (title) lastTitleByRole.set(role, title);
+      return { role, url: current, status: 0, title, reused: true };
+    }
+  }
   const response = await gotoPage(p, url);
-  try { await p.waitForTimeout(1000); } catch {}
   const status = response && typeof response.status === 'function' ? response.status() : 0;
-  return { role, url: p.url(), status, title: await pageTitle(p) };
+  try {
+    await p.waitForFunction(() => document.readyState !== 'loading', undefined, { timeout: READYSTATE_TIMEOUT, polling: 50 });
+  } catch {}
+  let title = await pageTitleFast(p);
+  if (!title) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    title = await pageTitleFast(p, 500);
+  }
+  const finalUrl = safeUrl(p);
+  if (title) lastTitleByRole.set(role, title);
+  return { role, url: finalUrl, status, title };
 }
 
 async function cmdText(req) {
