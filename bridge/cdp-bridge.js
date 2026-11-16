@@ -1182,17 +1182,22 @@ async function cmdProbe(req) {
       count = out.count;
       rows = out.rows;
     } catch (error) {
-      throw badSelector(`selector not usable: ${String(error && error.message || error).slice(0, 140)}`);
+      const msg = String(error && error.message || error);
+      // 只有"选择器用不了"才归 E_BAD_SELECTOR；崩溃/超时要原样抛，别伪装成选择器问题
+      if (/valid selector|unexpected token|unknown engine|parse error|selector.*invalid/i.test(msg)) {
+        throw badSelector(msg.slice(0, 140));
+      }
+      throw error;
     }
   }
   return { role, url: safeUrl(p), title, readyState, counts, count, rows };
 }
 
-/** Playwright 的超时错误（waitFor/click 等），用于把"超时"和"崩溃/非法选择器"分开 */
+/** Playwright 的超时错误（waitFor 等），用于把"超时"和"崩溃/非法选择器"分开 */
 function isPlaywrightTimeout(error) {
   const name = String(error && error.name || '');
   const msg = String(error && error.message || '');
-  return name === 'TimeoutError' || /Timeout \d+ms exceeded|timed out|waiting for/i.test(msg) && /Timeout/i.test(msg);
+  return name === 'TimeoutError' || /Timeout \d+ms exceeded/i.test(msg);
 }
 
 /** §A4：条件等待，超时 matched:false（不报错）；selector 非法 E_BAD_SELECTOR */
@@ -1387,8 +1392,14 @@ async function cmdType(req) {
       return false;
     }
   };
+  // insertText/keys 都要求"当前真的有可编辑元素在焦点上"，否则会静默打到 body 上，宁可失败
+  const requireFocused = async () => {
+    if (await activeInputFocused(p)) return;
+    throw codeError('E_TYPE_FAILED', 'no focused editable element (input/textarea/contenteditable) for keyboard text');
+  };
   if (mode === 'keys') {
     if (selector) await focusByClick();
+    await requireFocused();
     try {
       await p.keyboard.type(text, { delay: 0 });
       return done('keys');
@@ -1398,6 +1409,7 @@ async function cmdType(req) {
   }
   if (mode === 'insert') {
     if (selector) await focusByClick();
+    await requireFocused();
     try {
       await p.keyboard.insertText(text);
       return done('insert');
@@ -1429,9 +1441,11 @@ async function cmdType(req) {
     }
   }
   try {
+    await requireFocused();
     await p.keyboard.insertText(text);
     return done('insert');
   } catch (error) {
+    if (error && error.code === 'E_TYPE_FAILED') throw error;
     throw codeError('E_TYPE_FAILED', `fill+insert both failed: ${String(error && error.message || error).slice(0, 160)}`);
   }
 }

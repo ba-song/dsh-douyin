@@ -35,13 +35,40 @@ const OTHER_CONV = {
 }
 
 function makeCfg(over = {}) {
-  return normalizeConfig({
-    dmWatchEnabled: true,
-    dmWatchIntervalMs: 3000,
-    dmWatchStartupDelayMs: 0,
-    dmOwnerAliases: ['饲养员', '草荧'],
+  // over 在 normalizeConfig 之后合并：watchBackoff*/watchBreaker* 由 corefix 并行加进 lib/config.js，
+  // 本测试不依赖这些键是否已经存在（插件侧一律带默认值读）。
+  return {
+    ...normalizeConfig({
+      dmWatchEnabled: true,
+      dmWatchIntervalMs: 3000,
+      dmWatchStartupDelayMs: 0,
+      dmOwnerAliases: ['饲养员', '草荧'],
+    }),
     ...over,
-  })
+  }
+}
+
+/** 假 timers：记录 delay，测试可手动"到点"并 await 这一轮（含重新排期） */
+function makeTimers() {
+  const scheduled = []
+  const cleared = []
+  const timers = {
+    scheduled,
+    cleared,
+    setTimeout(fn, ms) {
+      const t = { fn, ms, unref() { return this } }
+      scheduled.push(t)
+      return t
+    },
+    clearTimeout(t) {
+      cleared.push(t)
+    },
+  }
+  timers.fire = async (t) => {
+    const r = await t.fn()
+    return r
+  }
+  return timers
 }
 
 function makeService(items = []) {
@@ -50,9 +77,10 @@ function makeService(items = []) {
   const svc = {
     calls,
     items,
+    failMessage: null,
     async dmPollConversations(opts = {}) {
       calls.push(opts)
-      if (failCode) return { ok: false, code: failCode, message: failCode }
+      if (failCode) return { ok: false, code: failCode, message: svc.failMessage ?? failCode }
       return { ok: true, items: svc.items.slice(), count: svc.items.length }
     },
     fail(code) {
@@ -65,6 +93,15 @@ function makeService(items = []) {
 function makeLogger() {
   const lines = []
   return { lines, info: (m) => lines.push(['info', String(m)]), warn: (m) => lines.push(['warn', String(m)]) }
+}
+
+function makeClock(start = 1794657000000) {
+  let now = start
+  return {
+    now: () => now,
+    advance: (ms) => { now += ms },
+    set: (ms) => { now = ms },
+  }
 }
 
 test('纯函数：时间归一 / 指纹 / 事件正文', () => {
@@ -341,4 +378,167 @@ test('dm watcher：页面切换造成的瞬时错位（出现一次又消失）�
   const r = await w.tick()
   assert.equal(r.newCount, 1)
   assert.equal(r.events[0].text, '真的来了')
+})
+
+test('失败退避：连续两次失败后 schedule 被推迟（3s→6s，fake timers 实测 delay）', async () => {
+  const timers = makeTimers()
+  const clock = makeClock(1794657000000)
+  const svc = makeService([OWNER_CONV])
+  svc.fail('E_REMOTE_IO')
+  const w = createDmWatcher({
+    cfg: makeCfg({ dmWatchStartupDelayMs: 0, watchBackoffMinMs: 3000, watchBackoffMaxMs: 60000, watchBackoffFactor: 2 }),
+    service: svc,
+    timers,
+    clock: clock.now,
+  })
+  assert.equal(w.start(), true)
+  assert.equal(timers.scheduled.length, 1)
+  assert.equal(timers.scheduled[0].ms, 0, '启动延迟 0')
+
+  // 第 1 次失败：按 max(intervalMs, minBackoff) = 3000 排期
+  let out = await timers.fire(timers.scheduled[0])
+  assert.equal(out.result.ok, false)
+  assert.equal(out.result.code, 'E_REMOTE_IO')
+  assert.equal(out.nextDelayMs, 3000)
+  assert.equal(timers.scheduled.at(-1).ms, 3000)
+  assert.equal(w.status().fails, 1)
+  assert.equal(w.status().backoffMs, 3000)
+  assert.equal(w.status().breakerOpen, false)
+
+  // 第 2 次失败：6s（比正常 3s 间隔推迟一倍）
+  clock.advance(3000)
+  out = await timers.fire(timers.scheduled.at(-1))
+  assert.equal(out.nextDelayMs, 6000)
+  assert.equal(timers.scheduled.at(-1).ms, 6000)
+  assert.equal(w.status().fails, 2)
+  assert.equal(w.status().backoffMs, 6000)
+  assert.ok(w.status().nextTickAt > clock.now(), 'nextTickAt 必须指向未来')
+
+  // 成功一次：退避归零，回到 intervalMs
+  svc.fail(null)
+  clock.advance(6000)
+  out = await timers.fire(timers.scheduled.at(-1))
+  assert.equal(out.nextDelayMs, 3000)
+  assert.equal(w.status().fails, 0)
+  assert.equal(w.status().backoffMs, 0)
+  w.stop()
+})
+
+test('熔断：连续 N 次失败暂停 watcher（冷却内不再按间隔），冷却到点单次探测成功后复位', async () => {
+  const timers = makeTimers()
+  const clock = makeClock(1794657000000)
+  const svc = makeService([OWNER_CONV])
+  svc.fail('E_TIMEOUT')
+  const log = makeLogger()
+  const w = createDmWatcher({
+    cfg: makeCfg({
+      dmWatchStartupDelayMs: 0,
+      watchBackoffMinMs: 3000,
+      watchBackoffMaxMs: 60000,
+      watchBackoffFactor: 2,
+      watchBreakerFails: 3,
+      watchBreakerCooldownMs: 30000,
+    }),
+    service: svc,
+    timers,
+    clock: clock.now,
+    log,
+  })
+  w.start()
+  assert.equal(timers.scheduled[0].ms, 0)
+
+  let out = await timers.fire(timers.scheduled[0]) // fail 1 → 3000
+  assert.equal(out.nextDelayMs, 3000)
+  clock.advance(3000)
+  out = await timers.fire(timers.scheduled.at(-1)) // fail 2 → 6000
+  assert.equal(out.nextDelayMs, 6000)
+  clock.advance(6000)
+  out = await timers.fire(timers.scheduled.at(-1)) // fail 3 → 熔断
+  assert.equal(w.status().fails, 3)
+  assert.equal(w.status().breakerOpen, true)
+  assert.equal(out.nextDelayMs, 30000, '熔断后等一个冷却周期，不再按 interval/backoff 排期')
+  assert.ok(log.lines.some(([lvl, m]) => lvl === 'warn' && m.includes('已熔断')))
+
+  // 熔断中：delayMs 仍是冷却剩余（不会被 interval 抢跑）
+  assert.equal(w.status().breakerCooldownMs, 30000)
+  assert.equal(w.status().breakerProbeTicks, 0)
+
+  // 冷却到点：单次探测仍失败 → 重新冷却一个周期
+  clock.advance(30000)
+  out = await timers.fire(timers.scheduled.at(-1))
+  assert.equal(out.result.ok, false)
+  assert.equal(out.nextDelayMs, 30000)
+  assert.equal(w.status().breakerOpen, true)
+  assert.equal(w.status().breakerProbeTicks, 1)
+
+  // 再冷却后探测成功 → 复位（fails=0 / backoffMs=0 / breakerOpen=false）
+  svc.fail(null)
+  clock.advance(30000)
+  out = await timers.fire(timers.scheduled.at(-1))
+  assert.equal(out.result.baseline, true)
+  assert.equal(out.nextDelayMs, 3000)
+  const st = w.status()
+  assert.equal(st.breakerOpen, false)
+  assert.equal(st.fails, 0)
+  assert.equal(st.backoffMs, 0)
+  assert.equal(st.lastFailCode, null)
+  w.stop()
+})
+
+test('崩溃感知：E_REMOTE_IO + Target crashed → 立刻请求一次桥 health；老桥 E_UNKNOWN_CMD 静默', async () => {
+  const clock = makeClock(1794657000000)
+  const svc = makeService([OWNER_CONV])
+  svc.fail('E_REMOTE_IO')
+  svc.failMessage = 'locator.count: Target crashed'
+  const log = makeLogger()
+  const healthCalls = []
+  const bridge = {
+    async call(cmd, params, opts) {
+      healthCalls.push({ cmd, params, opts })
+      const e = new Error('不允许的桥命令：health')
+      e.code = 'E_BAD_ARG'
+      throw e
+    },
+  }
+  const w = createDmWatcher({ cfg: makeCfg({ dmWatchStartupDelayMs: 0 }), service: svc, bridge, clock: clock.now, log })
+  const r = await w.tick()
+  assert.equal(r.ok, false)
+  const st = w.status()
+  assert.equal(st.healthProbes, 1)
+  assert.equal(st.healthSkipped, 1)
+  // 老桥不认识 health：不再刷错误日志，只保留"已请求健康检查"这一条 warn
+  assert.ok(log.lines.some(([lvl, m]) => lvl === 'warn' && m.includes('页面崩溃') && m.includes('已请求健康检查')))
+  assert.equal(healthCalls.length, 1)
+  assert.equal(healthCalls[0].cmd, 'health')
+  // tick() 自身不改退避（退避在 schedule 侧），但状态里崩溃探测结果可见
+  assert.equal(st.lastHealth, null)
+})
+
+test('崩溃感知：bridge 可用时 health 结果进 status（按 role 的 renderer）', async () => {
+  const clock = makeClock(1794657000000)
+  const timers = makeTimers()
+  const svc = makeService([OWNER_CONV])
+  svc.fail('E_BRIDGE_DOWN')
+  svc.failMessage = 'bridge down'
+  const bridge = {
+    async call(cmd) {
+      return {
+        browser: true,
+        pages: 2,
+        roles: {
+          main: { renderer: 'ok' },
+          dm: { renderer: 'crashed', crashedAt: 1 },
+        },
+      }
+    },
+  }
+  const w = createDmWatcher({ cfg: makeCfg({ dmWatchStartupDelayMs: 0 }), service: svc, bridge, timers, clock: clock.now })
+  w.start()
+  await timers.fire(timers.scheduled[0])
+  const st = w.status()
+  assert.equal(st.healthProbes, 1)
+  assert.equal(st.healthErrors, 0)
+  assert.deepEqual(st.lastHealth, { browser: true, pages: 2, roles: { main: 'ok', dm: 'crashed' } })
+  assert.equal(st.healthSkipped, 0)
+  w.stop()
 })
