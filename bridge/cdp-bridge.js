@@ -621,6 +621,80 @@ function normalizeDouyinUrl(input) {
   return u.toString();
 }
 
+// ===== 纯校验/归一化函数（可单测：不碰浏览器）=====
+
+function codeError(code, message) {
+  return Object.assign(new Error(`${code}: ${message}`), { code });
+}
+
+function badArg(message) { return codeError('E_BAD_ARG', message); }
+function badSelector(message) { return codeError('E_BAD_SELECTOR', message); }
+function badPattern(message) { return codeError('E_BAD_PATTERN', message); }
+
+/**
+ * selector 静态校验：只挡空/超长/控制字符（引擎语法仍由 Playwright 运行时判定）。
+ * probe 的 counts 单项用它做"宽松判定"（invalid → -1），waitFor/click 用它抛 E_BAD_SELECTOR。
+ */
+function selectorOk(selector) {
+  const raw = typeof selector === 'string' ? selector : String(selector === undefined || selector === null ? '' : selector);
+  const s = raw.trim();
+  if (!s) return false;
+  if (s.length > SELECTOR_MAX_LEN) return false;
+  if (/[\u0000-\u001f\u007f]/.test(s)) return false;
+  return true;
+}
+
+function validateSelector(selector) {
+  const s = String(selector === undefined || selector === null ? '' : selector).trim();
+  if (!s) throw badSelector('empty selector');
+  if (s.length > SELECTOR_MAX_LEN) throw badSelector(`selector too long (${s.length} > ${SELECTOR_MAX_LEN})`);
+  if (/[\u0000-\u001f\u007f]/.test(s)) throw badSelector('selector contains control chars');
+  return s;
+}
+
+/** netArm patterns：URL 子串白名单，≤8 个、每个 1..120 且只允许 URL 常见字符；去重保序 */
+function validatePatterns(input) {
+  if (input === undefined || input === null) throw badArg('patterns: non-empty array required');
+  if (!Array.isArray(input)) throw badArg('patterns: array required');
+  if (input.length === 0) throw badArg('patterns: non-empty array required');
+  if (input.length > NET_MAX_PATTERNS) throw badPattern(`too many patterns (${input.length} > ${NET_MAX_PATTERNS})`);
+  const out = [];
+  for (const raw of input) {
+    const s = String(raw === undefined || raw === null ? '' : raw).trim();
+    if (!NET_PATTERN_RE.test(s)) throw badPattern(`rejected pattern (allowed: ${NET_PATTERN_RE.source}, max 120): ${s.slice(0, 60)}`);
+    if (!out.includes(s)) out.push(s);
+  }
+  if (out.length === 0) throw badArg('patterns: empty after normalize');
+  return out;
+}
+
+/** probe counts：≤8 个、按请求顺序保留原始 selector 字符串（非法项留给调用处标 -1） */
+function normalizeProbeCounts(input) {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) throw badArg('counts: array required');
+  if (input.length > PROBE_MAX_COUNTS) throw badArg(`counts too many (${input.length} > ${PROBE_MAX_COUNTS})`);
+  return input.map((x) => String(x === undefined || x === null ? '' : x).trim());
+}
+
+function normalizeWaitState(input) {
+  const s = String(input === undefined || input === null || input === '' ? 'visible' : input).trim().toLowerCase();
+  if (!WAIT_STATES.includes(s)) throw badArg(`state must be one of ${WAIT_STATES.join('/')}, got ${s.slice(0, 30)}`);
+  return s;
+}
+
+/** open reuse 的 URL 比对口径：忽略 hash、忽略末尾 `/`、查询串保留（顺序不归一） */
+function normalizeUrlForCompare(input) {
+  const raw = String(input === undefined || input === null ? '' : input).trim();
+  if (!raw) return '';
+  try {
+    const u = new URL(raw);
+    const pathname = u.pathname.replace(/\/+$/, '');
+    return `${u.protocol}//${u.host}${pathname}${u.search}`;
+  } catch {
+    return raw.replace(/#.*$/, '').replace(/\/+$/, '');
+  }
+}
+
 function pngSize(file) {
   try {
     const b = fs.readFileSync(file);
