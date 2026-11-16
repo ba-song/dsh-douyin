@@ -130,7 +130,7 @@ test('队列分道：watchQueue 忙时 watch 原语 skip:busy，userQueue 仍立
         if (payload?.role === 'dm') await gate
         return { ok: true, cmd: 'url', result: HOME }
       },
-      count: () => ({ ok: true, cmd: 'count', result: 0 }),
+      count: () => ({ ok: true, cmd: 'count', result: 1 }),
       list: () => ({ ok: true, cmd: 'list', result: [] }),
       jsWatch: () => ({ ok: true, cmd: 'jsWatch', result: { action: 'start', seq: 1, cursor: 0, pending: 0, events: [] } }),
     },
