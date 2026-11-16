@@ -6,6 +6,13 @@ BASE="${CDP_BASE:-/persistent/cdp}"
 PIDFILE="$BASE/bridge.pid"
 CLIENT="$BASE/client-stdin.js"
 NODE="$(command -v node || echo /manager/extensions/harness/program/node/bin/node)"
+# 本机 X display 可能是 :1（desktop 扩展）而不是旧文档里的 :20：自动挑一个能用的
+if [ -z "${DISPLAY:-}" ] || ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+  for d in :1 :20 :0; do
+    if xdpyinfo -display "$d" >/dev/null 2>&1; then export DISPLAY="$d"; break; fi
+  done
+fi
+echo "DISPLAY=${DISPLAY:-unset}"
 
 echo "== before =="
 if [ -f "$PIDFILE" ]; then
