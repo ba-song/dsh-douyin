@@ -849,27 +849,49 @@ async function listRows(p, selector, options = {}) {
   const limit = clampInt(options.limit, 1, 50, 20);
   const textLen = clampInt(options.textLen, 1, 500, 60);
   const attrs = Array.isArray(options.attrs) ? options.attrs.map(String).slice(0, PROBE_MAX_ATTRS) : [];
-  const result = await p.evaluate(({ selector, limit, textLen, attrs }) => {
-    const nodes = document.querySelectorAll(selector);
-    const count = nodes.length;
-    const rows = [];
-    const n = Math.min(count, limit);
-    for (let i = 0; i < n; i += 1) {
-      const el = nodes[i];
-      const row = {};
-      try {
-        row.text = String(el.innerText || '').slice(0, textLen);
-      } catch {
-        row.text = null;
+  try {
+    const result = await p.evaluate(({ selector, limit, textLen, attrs }) => {
+      const nodes = document.querySelectorAll(selector);
+      const count = nodes.length;
+      const rows = [];
+      const n = Math.min(count, limit);
+      for (let i = 0; i < n; i += 1) {
+        const el = nodes[i];
+        const row = {};
+        try {
+          row.text = String(el.innerText || '').slice(0, textLen);
+        } catch {
+          row.text = null;
+        }
+        for (const attr of attrs) {
+          try { row[attr] = el.getAttribute(attr); } catch { row[attr] = null; }
+        }
+        rows.push(row);
       }
-      for (const attr of attrs) {
-        try { row[attr] = el.getAttribute(attr); } catch { row[attr] = null; }
-      }
-      rows.push(row);
+      return { count, rows };
+    }, { selector, limit, textLen, attrs });
+    if (result && typeof result === 'object') return result;
+  } catch (error) {
+    // 页内 querySelectorAll 跑不了（Playwright 扩展语法 :has-text()/:text-is()/>> 链）→ 老实现兜底
+    const msg = String(error && error.message || error);
+    if (!/not a valid selector|is not a valid selector|Unexpected token|Unknown engine|SyntaxError|DOMException/i.test(msg)) throw error;
+  }
+  const loc = p.locator(selector);
+  const count = await loc.count();
+  const out = [];
+  for (let i = 0; i < count && out.length < limit; i += 1) {
+    const el = loc.nth(i);
+    const item = {};
+    try {
+      const text = await el.innerText({ timeout: 5000 });
+      item.text = String(text || '').slice(0, textLen);
+    } catch { item.text = null; }
+    for (const attr of attrs) {
+      try { item[attr] = await el.getAttribute(attr); } catch { item[attr] = null; }
     }
-    return { count, rows };
-  }, { selector, limit, textLen, attrs });
-  return result && typeof result === 'object' ? result : { count: 0, rows: [] };
+    out.push(item);
+  }
+  return { count, rows: out };
 }
 
 async function cmdList(req) {
@@ -1193,9 +1215,19 @@ async function cmdProbe(req) {
       inPage = null; // 页面崩溃/evaluate 失败 → 退回逐项（保持旧行为，不伪装 0）
     }
     if (inPage && typeof inPage === 'object') {
+      const unresolved = [];
       for (const sel of validSel) {
         const n = Number(inPage[sel]);
-        counts[sel] = Number.isFinite(n) && n >= 0 ? Math.floor(n) : -1;
+        if (Number.isFinite(n) && n >= 0) counts[sel] = Math.floor(n);
+        else unresolved.push(sel);
+      }
+      // 页内 querySelectorAll 跑不了的（Playwright 扩展语法如 :has-text()/:text-is()、>> 链）→
+      // 退回 Playwright locator.count，保证老选择器语义不变（只对这类做一次往返）。
+      if (unresolved.length) {
+        const entries = await Promise.all(unresolved.map(async (sel) => {
+          try { return [sel, await p.locator(sel).count()]; } catch { return [sel, -1]; }
+        }));
+        for (const [sel, value] of entries) counts[sel] = value;
       }
     } else {
       const entries = await Promise.all(validSel.map(async (sel) => {
