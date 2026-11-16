@@ -62,6 +62,7 @@ const LIMITS = {
 /** ping 暴露的能力位：插件侧据此判断能否用新命令（老桥没有这个字段 → 走旧多调用路径） */
 const CAPABILITIES = Object.freeze([
   'health', 'probe', 'waitFor', 'netArm', 'netTake', 'clickTimeout', 'clickNoScroll', 'openReuse',
+  'type', 'pressHotkeys',
 ]);
 /** click：非 force 默认 3s，force 默认 1.5s；scrollIntoViewIfNeeded 只给 600ms */
 const CLICK_TIMEOUT_DEFAULT = 3000;
@@ -91,6 +92,16 @@ const NET_TAKE_TIMEOUT_DEFAULT = 1200;
 const NET_TAKE_POLL_INTERVAL = 60;
 /** selector 静态校验上限（Playwright 引擎语法留给运行时；这里只挡空/超长/控制字符） */
 const SELECTOR_MAX_LEN = 512;
+/** type：纯文本写入（A9）。只当纯文本，不接受脚本/表达式；keys 模式只允许可打印 ASCII */
+const TYPE_MAX_CHARS = 2000;
+const TYPE_MODES = Object.freeze(['auto', 'fill', 'insert', 'keys']);
+const TYPE_FILL_TIMEOUT = 2500;
+const TYPE_FILL_CLEAR_TIMEOUT = 1500;
+const TYPE_FOCUS_CLICK_TIMEOUT = 800;
+const PRINTABLE_ASCII_RE = /^[\x20-\x7E]*$/;
+/** press：A10 快捷键白名单（z/c/x 是抖音网页版点赞/收藏/评论） */
+const PRESS_NAMED_KEYS = Object.freeze(['Escape', 'Enter', 'ArrowDown', 'ArrowUp']);
+const PRESS_HOTKEY_CHARS = Object.freeze(['z', 'c', 'x']);
 const ALLOWED_HOSTS = new Set(['www.douyin.com', 'douyin.com', 'login.douyin.com']);
 
 let context = null;
@@ -695,6 +706,63 @@ function normalizeUrlForCompare(input) {
   }
 }
 
+function charCount(text) {
+  return [...String(text === undefined || text === null ? '' : text)].length;
+}
+
+/** type 的正文校验（A9）：必须是字符串、按码点 ≤2000；空串合法（表示"只清空"）；只当纯文本 */
+function validateTypeText(input) {
+  if (typeof input !== 'string') throw badArg('text: string required (pure text only)');
+  if (charCount(input) > TYPE_MAX_CHARS) throw badArg(`text too long (${charCount(input)} > ${TYPE_MAX_CHARS})`);
+  return input;
+}
+
+/** keys 模式只允许可打印 ASCII（\x20-\x7E），否则 E_BAD_TEXT */
+function validateKeysText(text) {
+  const s = validateTypeText(text);
+  if (!PRINTABLE_ASCII_RE.test(s)) throw codeError('E_BAD_TEXT', 'keys mode allows printable ASCII only [\\x20-\\x7E]');
+  return s;
+}
+
+function normalizeTypeMode(input) {
+  const s = String(input === undefined || input === null || input === '' ? 'auto' : input).trim().toLowerCase();
+  if (!TYPE_MODES.includes(s)) throw badArg(`mode must be one of ${TYPE_MODES.join('/')}, got ${s.slice(0, 20)}`);
+  return s;
+}
+
+function normalizeNth(input) {
+  if (input === undefined || input === null || input === '') return 0;
+  const n = Number(input);
+  if (!Number.isInteger(n) || n < 0) throw codeError('E_BAD_NTH', `nth must be integer >= 0, got ${String(input).slice(0, 20)}`);
+  return n;
+}
+
+/** press 键名归一：命名键必须精确（旧协议兼容），z/c/x 大小写都收，统一小写 */
+function normalizePressKey(input) {
+  const raw = String(input === undefined || input === null ? '' : input).trim();
+  if (!raw) throw codeError('E_BAD_KEY', 'empty key');
+  if (raw.length === 1) {
+    const lower = raw.toLowerCase();
+    if (PRESS_HOTKEY_CHARS.includes(lower)) return lower;
+    throw codeError('E_BAD_KEY', `hotkey must be one of ${PRESS_HOTKEY_CHARS.join('/')}`);
+  }
+  if (PRESS_NAMED_KEYS.includes(raw)) return raw;
+  throw codeError('E_BAD_KEY', `${raw.slice(0, 20)} (allowed: ${[...PRESS_NAMED_KEYS, ...PRESS_HOTKEY_CHARS].join('/')})`);
+}
+
+/**
+ * activeElement 是否是可编辑控件（纯函数，便于单测）。
+ * 入参是页面里取回的描述对象：{tagName, isContentEditable, editableAncestor}。
+ */
+function isEditableDescriptor(desc) {
+  if (!desc || typeof desc !== 'object') return false;
+  const tag = String(desc.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+  if (desc.isContentEditable === true) return true;
+  if (desc.editableAncestor === true) return true;
+  return false;
+}
+
 function pngSize(file) {
   try {
     const b = fs.readFileSync(file);
@@ -1046,6 +1114,340 @@ async function cmdClick(req) {
   const dispatched = await target.dispatchEvent('click').then(() => true).catch(() => false);
   if (!dispatched) throw Object.assign(new Error('E_CLICK_FAILED'), { code: 'E_CLICK_FAILED' });
   return { ok: true, ms: Date.now() - started, dispatched: true };
+}
+
+// ===== 协议 v2 新命令：health / probe / waitFor / netArm / netTake / type / press =====
+
+const HEALTH_EVAL_FALLBACK = -1;
+
+/** 单 role 健康判定（§A2）：crashed 走缓存不 evaluate；closed 直接判；否则 evaluate(()=>1) 带 400ms 上限 */
+async function roleHealthOf(role) {
+  const crashedAt = crashedRoles.at(role);
+  if (crashedAt) {
+    const cached = crashedInfoByRole.get(role) || {};
+    return { url: cached.url || null, title: cached.title || lastTitleByRole.get(role) || '', renderer: 'crashed', crashed: true, crashedAt };
+  }
+  const p = getRolePage(role);
+  if (!p) return { url: null, title: lastTitleByRole.get(role) || '', renderer: 'closed', crashed: false };
+  const [aliveFlag, titleNow] = await Promise.all([
+    withDeadline(p.evaluate(() => 1), HEALTH_EVAL_TIMEOUT, HEALTH_EVAL_FALLBACK).catch(() => HEALTH_EVAL_FALLBACK),
+    pageTitleFast(p, 250),
+  ]);
+  const renderer = aliveFlag === 1 ? 'ok' : 'unknown';
+  if (titleNow) lastTitleByRole.set(role, titleNow);
+  return { url: safeUrl(p) || null, title: titleNow || lastTitleByRole.get(role) || '', renderer, crashed: false };
+}
+
+/** §A2：极快健康检查；不 ensureBrowser（浏览器没起也立刻回答），三个 role 并行 evaluate */
+async function cmdHealth() {
+  let pages = 0;
+  let browser = false;
+  try {
+    browser = browserAlive();
+    pages = context ? context.pages().length : 0;
+  } catch {}
+  const entries = await Promise.all(ROLES.map(async (role) => [role, await roleHealthOf(role)]));
+  const roles = {};
+  for (const [role, info] of entries) roles[role] = info;
+  return { browser, pages, roles };
+}
+
+/** §A3：一次往返拿 url/title/readyState/多个 count/一次 list */
+async function cmdProbe(req) {
+  const role = roleOfRequest(req);
+  const countsReq = normalizeProbeCounts(req.counts);
+  const selectorRaw = req.selector === undefined || req.selector === null ? '' : String(req.selector);
+  const selector = selectorRaw.trim();
+  if (!countsReq.length && !selector) throw badArg('probe needs counts[] or selector');
+  if (selector && !selectorOk(selector)) throw badSelector('selector invalid');
+  const p = await ensureRolePage(role);
+  const [title, readyState] = await Promise.all([pageTitleFast(p), pageReadyState(p)]);
+  if (title) lastTitleByRole.set(role, title);
+  // counts 并行；单个 selector 非法/取不到只让该项 -1，整体不失败
+  const countEntries = await Promise.all(countsReq.map(async (sel) => {
+    if (!sel || !selectorOk(sel)) return [sel, -1];
+    try {
+      return [sel, await p.locator(sel).count()];
+    } catch {
+      return [sel, -1];
+    }
+  }));
+  const counts = {};
+  for (const [sel, value] of countEntries) counts[sel] = value;
+  let count = null;
+  let rows = [];
+  if (selector) {
+    try {
+      const out = await listRows(p, selector, req);
+      count = out.count;
+      rows = out.rows;
+    } catch (error) {
+      throw badSelector(`selector not usable: ${String(error && error.message || error).slice(0, 140)}`);
+    }
+  }
+  return { role, url: safeUrl(p), title, readyState, counts, count, rows };
+}
+
+/** Playwright 的超时错误（waitFor/click 等），用于把"超时"和"崩溃/非法选择器"分开 */
+function isPlaywrightTimeout(error) {
+  const name = String(error && error.name || '');
+  const msg = String(error && error.message || '');
+  return name === 'TimeoutError' || /Timeout \d+ms exceeded|timed out|waiting for/i.test(msg) && /Timeout/i.test(msg);
+}
+
+/** §A4：条件等待，超时 matched:false（不报错）；selector 非法 E_BAD_SELECTOR */
+async function cmdWaitFor(req) {
+  const role = roleOfRequest(req);
+  const selector = validateSelector(req.selector);
+  const state = normalizeWaitState(req.state);
+  const timeoutMs = clampInt(req.timeoutMs, WAIT_TIMEOUT_MIN, WAIT_TIMEOUT_MAX, WAIT_TIMEOUT_DEFAULT);
+  const p = await ensureRolePage(role);
+  const started = Date.now();
+  try {
+    await p.locator(selector).first().waitFor({ state, timeout: timeoutMs });
+    return { role, matched: true, ms: Date.now() - started, state, timeoutMs };
+  } catch (error) {
+    if (isPlaywrightTimeout(error)) return { role, matched: false, ms: Date.now() - started, state, timeoutMs };
+    const msg = String(error && error.message || error);
+    if (/valid selector|unexpected token|unknown engine|parse error|selector.*invalid/i.test(msg)) {
+      throw badSelector(msg.slice(0, 160));
+    }
+    throw error;
+  }
+}
+
+/**
+ * 页面内安装网络包装（在 page context 执行，必须自包含）：
+ * fetch + XHR 固定包装，只记 url/method/status/seq/ts，不存 body；幂等（重复 arm 只更新 patterns）。
+ */
+function installNetTracker({ patterns, max }) {
+  const key = '__dshNet';
+  let net = window[key];
+  if (!net) {
+    net = window[key] = { installed: false, seq: 0, events: [], patterns: [], max: 200, wrappedFetch: false, wrappedXhr: false };
+  }
+  net.patterns = Array.isArray(patterns) ? patterns.slice(0, 8) : [];
+  net.max = Math.max(1, Math.min(1000, Number(max) || 200));
+  const hit = (url) => {
+    const u = String(url || '');
+    if (!u) return false;
+    for (const p of net.patterns) { if (u.indexOf(p) >= 0) return true; }
+    return false;
+  };
+  const push = (url, method, status) => {
+    net.seq += 1;
+    net.events.push({
+      seq: net.seq,
+      url: String(url || '').slice(0, 800),
+      method: String(method || 'GET').toUpperCase().slice(0, 8),
+      status: Number.isFinite(Number(status)) ? Number(status) : 0,
+      ts: Date.now(),
+    });
+    if (net.events.length > net.max) net.events.splice(0, net.events.length - net.max);
+  };
+  if (!net.wrappedFetch && typeof window.fetch === 'function') {
+    net.wrappedFetch = true;
+    const orig = window.fetch;
+    window.fetch = function (...args) {
+      const input = args[0];
+      const url = String(input && input.url ? input.url : input || '');
+      const method = String((args[1] && args[1].method) || (input && input.method) || 'GET');
+      const promise = orig.apply(this, args);
+      if (hit(url)) {
+        try {
+          promise.then(
+            (res) => { try { push(res && res.url ? res.url : url, method, res && res.status); } catch (e) {} },
+            () => { try { push(url, method, 0); } catch (e) {} },
+          );
+        } catch (e) {}
+      }
+      return promise;
+    };
+  }
+  if (!net.wrappedXhr && typeof XMLHttpRequest !== 'undefined') {
+    net.wrappedXhr = true;
+    const origOpen = XMLHttpRequest.prototype.open;
+    const origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      this.__dshNetUrl = String(url || '');
+      this.__dshNetMethod = String(method || 'GET');
+      return origOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function () {
+      const self = this;
+      if (hit(self.__dshNetUrl || '')) {
+        try {
+          self.addEventListener('loadend', () => { try { push(self.responseURL || self.__dshNetUrl, self.__dshNetMethod, self.status); } catch (e) {} });
+        } catch (e) {}
+      }
+      return origSend.apply(this, arguments);
+    };
+  }
+  net.installed = true;
+  return { installed: net.installed, seq: net.seq, events: net.events.length, patterns: net.patterns.slice() };
+}
+
+/** §A5：arm 固定包装（幂等、不阻塞页面） */
+async function cmdNetArm(req) {
+  const role = roleOfRequest(req);
+  const patterns = validatePatterns(req.patterns);
+  const p = await ensureRolePage(role);
+  const result = await p.evaluate(installNetTracker, { patterns, max: NET_MAX_EVENTS });
+  return {
+    role,
+    armed: true,
+    seq: Number(result && result.seq) || 0,
+    patterns: Array.isArray(result && result.patterns) ? result.patterns : patterns,
+  };
+}
+
+/** §A5：在 timeoutMs 内轮询 __dshNet.events，命中 want 条即返回（否则 matched:false） */
+async function cmdNetTake(req) {
+  const role = roleOfRequest(req);
+  const sinceSeq = clampInt(req.sinceSeq, 0, Number.MAX_SAFE_INTEGER, 0);
+  const timeoutMs = clampInt(req.timeoutMs, NET_TAKE_TIMEOUT_MIN, NET_TAKE_TIMEOUT_MAX, NET_TAKE_TIMEOUT_DEFAULT);
+  const want = clampInt(req.want, 1, NET_TAKE_MAX_WANT, 1);
+  const p = await ensureRolePage(role);
+  const started = Date.now();
+  let seq = 0;
+  let events = [];
+  let missing = false;
+  for (;;) {
+    const snap = await p.evaluate(() => {
+      const n = window.__dshNet;
+      if (!n) return { missing: true, seq: 0, events: [] };
+      return { missing: false, seq: Number(n.seq) || 0, events: Array.isArray(n.events) ? n.events.slice(-200) : [] };
+    });
+    if (!snap || snap.missing) {
+      missing = true;
+      seq = 0;
+      events = [];
+      break;
+    }
+    seq = Number(snap.seq) || 0;
+    events = (snap.events || [])
+      .filter((e) => e && Number(e.seq) > sinceSeq)
+      .slice(0, NET_TAKE_MAX_EVENTS);
+    if (events.length >= want) break;
+    const elapsed = Date.now() - started;
+    if (elapsed >= timeoutMs) break;
+    await new Promise((resolve) => setTimeout(resolve, Math.max(10, Math.min(NET_TAKE_POLL_INTERVAL, timeoutMs - elapsed))));
+  }
+  const matched = events.length >= want;
+  const out = { role, seq, events, matched, ms: Date.now() - started, timeoutMs, want };
+  if (missing) out.missing = true;
+  return out;
+}
+
+/**
+ * 页面内取 activeElement 描述（自包含）：判断"现在是不是在输入框里"。
+ * 真正判定交给 Node 侧的 isEditableDescriptor（纯函数，可单测）。
+ */
+function describeActiveElement() {
+  const el = document.activeElement;
+  if (!el) return { tagName: '', isContentEditable: false, editableAncestor: false };
+  let editableAncestor = false;
+  try {
+    editableAncestor = Boolean(el.closest && el.closest('[contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]'));
+  } catch (e) {}
+  return {
+    tagName: String(el.tagName || '').toUpperCase(),
+    isContentEditable: Boolean(el.isContentEditable),
+    editableAncestor,
+  };
+}
+
+async function activeInputFocused(p) {
+  const desc = await withDeadline(p.evaluate(describeActiveElement), 600, null).catch(() => null);
+  return isEditableDescriptor(desc);
+}
+
+/**
+ * §A9：桥内纯文本写入（替代 X11 剪贴板/逐字输入）。
+ * mode=auto：有 selector 先 fill（clear 时先 fill('')），失败退 click(force,800) + keyboard.insertText。
+ * 只当纯文本，不接受脚本/表达式。
+ */
+async function cmdType(req) {
+  const role = roleOfRequest(req);
+  const mode = normalizeTypeMode(req.mode);
+  const text = mode === 'keys' ? validateKeysText(req.text) : validateTypeText(req.text);
+  const clear = req.clear === true;
+  const selectorRaw = req.selector === undefined || req.selector === null ? '' : String(req.selector);
+  const selector = selectorRaw.trim() ? validateSelector(selectorRaw) : '';
+  const nth = normalizeNth(req.nth);
+  const p = await ensureRolePage(role);
+  const started = Date.now();
+  const done = (via) => ({ role, via, chars: charCount(text), ms: Date.now() - started });
+  const focusByClick = async () => {
+    if (!selector) return false;
+    try {
+      await p.locator(selector).nth(nth).click({ force: true, timeout: TYPE_FOCUS_CLICK_TIMEOUT });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (mode === 'keys') {
+    if (selector) await focusByClick();
+    try {
+      await p.keyboard.type(text, { delay: 0 });
+      return done('keys');
+    } catch (error) {
+      throw codeError('E_TYPE_FAILED', `keys type failed: ${String(error && error.message || error).slice(0, 160)}`);
+    }
+  }
+  if (mode === 'insert') {
+    if (selector) await focusByClick();
+    try {
+      await p.keyboard.insertText(text);
+      return done('insert');
+    } catch (error) {
+      throw codeError('E_TYPE_FAILED', `insertText failed: ${String(error && error.message || error).slice(0, 160)}`);
+    }
+  }
+  if (mode === 'fill') {
+    if (!selector) throw badArg('fill mode requires selector');
+    try {
+      const loc = p.locator(selector).nth(nth);
+      if (clear) await loc.fill('', { timeout: TYPE_FILL_CLEAR_TIMEOUT });
+      await loc.fill(text, { timeout: TYPE_FILL_TIMEOUT });
+      return done('fill');
+    } catch (error) {
+      throw codeError('E_TYPE_FAILED', `fill failed: ${String(error && error.message || error).slice(0, 160)}`);
+    }
+  }
+  // auto
+  if (selector) {
+    try {
+      const loc = p.locator(selector).nth(nth);
+      if (clear) await loc.fill('', { timeout: TYPE_FILL_CLEAR_TIMEOUT });
+      await loc.fill(text, { timeout: TYPE_FILL_TIMEOUT });
+      return done('fill');
+    } catch (error) {
+      log(`type auto fill fallback: ${String(error && error.message || error).slice(0, 160)}`);
+      await focusByClick();
+    }
+  }
+  try {
+    await p.keyboard.insertText(text);
+    return done('insert');
+  } catch (error) {
+    throw codeError('E_TYPE_FAILED', `fill+insert both failed: ${String(error && error.message || error).slice(0, 160)}`);
+  }
+}
+
+/** §A10：快捷键走桥；按键前检查 activeElement（输入框聚焦时拒绝，除非 req.allowFocused===true） */
+async function cmdPress(req) {
+  const role = roleOfRequest(req);
+  const p = await ensureRolePage(role);
+  const key = normalizePressKey(req.key);
+  const focused = await activeInputFocused(p);
+  const allowFocused = req.allowFocused === true;
+  if (focused && !allowFocused) {
+    throw codeError('E_INPUT_FOCUSED', `active element is an editable input; refusing key=${key} (pass allowFocused:true to override)`);
+  }
+  await p.keyboard.press(key);
+  return { role, key, inputFocused: focused };
 }
 
 async function cmdScroll(req) {
