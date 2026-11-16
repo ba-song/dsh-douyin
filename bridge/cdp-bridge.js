@@ -769,13 +769,15 @@ async function cmdCount(req) {
   return await p.locator(String(req.selector || '')).count();
 }
 
-async function cmdList(req) {
-  const role = roleOfRequest(req);
-  const p = await ensureRolePage(role);
-  const limit = clampInt(req.limit, 1, 50, 20);
-  const textLen = clampInt(req.textLen, 1, 500, 60);
-  const attrs = Array.isArray(req.attrs) ? req.attrs.map(String).slice(0, 10) : [];
-  const loc = p.locator(String(req.selector || ''));
+/**
+ * list 的行抽取逻辑（cmdList 与 cmdProbe 共用，截断规则一致）：
+ * count = 选择器命中数；rows 最多 limit 行，text 截 textLen，attrs 最多 10 个。
+ */
+async function listRows(p, selector, options = {}) {
+  const limit = clampInt(options.limit, 1, 50, 20);
+  const textLen = clampInt(options.textLen, 1, 500, 60);
+  const attrs = Array.isArray(options.attrs) ? options.attrs.map(String).slice(0, PROBE_MAX_ATTRS) : [];
+  const loc = p.locator(selector);
   const count = await loc.count();
   const out = [];
   for (let i = 0; i < count && out.length < limit; i += 1) {
@@ -790,7 +792,14 @@ async function cmdList(req) {
     }
     out.push(item);
   }
-  return out;
+  return { count, rows: out };
+}
+
+async function cmdList(req) {
+  const role = roleOfRequest(req);
+  const p = await ensureRolePage(role);
+  const { rows } = await listRows(p, String(req.selector || ''), req);
+  return rows;
 }
 
 /**
