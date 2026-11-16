@@ -574,9 +574,9 @@ async function ensureRolePage(role) {
   await ensureBrowser();
   let p = getRolePage(role);
   if (p) return p;
+  if (crashedRoles.has(role)) log(`role=${role} rebuilding after crash at=${crashedRoles.at(role)}`);
   p = await context.newPage();
-  pageByRole.set(role, p);
-  roleByPage.set(p, role);
+  registerRolePage(role, p);
   if (role !== 'main') await attachMute(p);
   log(`role=${role} recreated`);
   const initial = role === 'notify' ? NOTIFY_URL : role === 'dm' ? DM_URL : '';
