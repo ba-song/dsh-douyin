@@ -840,27 +840,36 @@ async function cmdCount(req) {
 /**
  * list 的行抽取逻辑（cmdList 与 cmdProbe 共用，截断规则一致）：
  * count = 选择器命中数；rows 最多 limit 行，text 截 textLen，attrs 最多 10 个。
+ *
+ * 2026-11-16 性能改造：旧实现每行 1 次 innerText + N 次 getAttribute（Playwright 每属性一次 CDP 往返），
+ * 实测 list 4 attrs ≈ 800ms。现在**页内一次 evaluate** 完成 count + 文本 + 属性，
+ * 只把结果 JSON 带回来（截断在页内做），典型 10–30ms。固定只读函数，不接收任意脚本。
  */
 async function listRows(p, selector, options = {}) {
   const limit = clampInt(options.limit, 1, 50, 20);
   const textLen = clampInt(options.textLen, 1, 500, 60);
   const attrs = Array.isArray(options.attrs) ? options.attrs.map(String).slice(0, PROBE_MAX_ATTRS) : [];
-  const loc = p.locator(selector);
-  const count = await loc.count();
-  const out = [];
-  for (let i = 0; i < count && out.length < limit; i += 1) {
-    const el = loc.nth(i);
-    const item = {};
-    try {
-      const text = await el.innerText({ timeout: 5000 });
-      item.text = String(text || '').slice(0, textLen);
-    } catch { item.text = null; }
-    for (const attr of attrs) {
-      try { item[attr] = await el.getAttribute(attr); } catch { item[attr] = null; }
+  const result = await p.evaluate(({ selector, limit, textLen, attrs }) => {
+    const nodes = document.querySelectorAll(selector);
+    const count = nodes.length;
+    const rows = [];
+    const n = Math.min(count, limit);
+    for (let i = 0; i < n; i += 1) {
+      const el = nodes[i];
+      const row = {};
+      try {
+        row.text = String(el.innerText || '').slice(0, textLen);
+      } catch {
+        row.text = null;
+      }
+      for (const attr of attrs) {
+        try { row[attr] = el.getAttribute(attr); } catch { row[attr] = null; }
+      }
+      rows.push(row);
     }
-    out.push(item);
-  }
-  return { count, rows: out };
+    return { count, rows };
+  }, { selector, limit, textLen, attrs });
+  return result && typeof result === 'object' ? result : { count: 0, rows: [] };
 }
 
 async function cmdList(req) {
@@ -1164,16 +1173,37 @@ async function cmdProbe(req) {
   const [title, readyState] = await Promise.all([pageTitleFast(p), pageReadyState(p)]);
   if (title) lastTitleByRole.set(role, title);
   // counts 并行；单个 selector 非法/取不到只让该项 -1，整体不失败
-  const countEntries = await Promise.all(countsReq.map(async (sel) => {
-    if (!sel || !selectorOk(sel)) return [sel, -1];
-    try {
-      return [sel, await p.locator(sel).count()];
-    } catch {
-      return [sel, -1];
-    }
-  }));
+  // counts：一次页内 evaluate 全查（旧实现每个 selector 一次 locator.count 往返，且
+  // [id^="..."]/[class*="..."] 这类属性前缀在选择器引擎里极慢，实测 846ms）。
+  // 单个 selector 非法/取不到只让该项 -1，整体不失败。
+  const validSel = countsReq.filter((sel) => sel && selectorOk(sel));
   const counts = {};
-  for (const [sel, value] of countEntries) counts[sel] = value;
+  for (const sel of countsReq) if (!sel || !selectorOk(sel)) counts[sel] = -1;
+  if (validSel.length) {
+    let inPage = null;
+    try {
+      inPage = await p.evaluate(({ sels }) => {
+        const out = {};
+        for (const s of sels) {
+          try { out[s] = document.querySelectorAll(s).length; } catch { out[s] = -1; }
+        }
+        return out;
+      }, { sels: validSel });
+    } catch {
+      inPage = null; // 页面崩溃/evaluate 失败 → 退回逐项（保持旧行为，不伪装 0）
+    }
+    if (inPage && typeof inPage === 'object') {
+      for (const sel of validSel) {
+        const n = Number(inPage[sel]);
+        counts[sel] = Number.isFinite(n) && n >= 0 ? Math.floor(n) : -1;
+      }
+    } else {
+      const entries = await Promise.all(validSel.map(async (sel) => {
+        try { return [sel, await p.locator(sel).count()]; } catch { return [sel, -1]; }
+      }));
+      for (const [sel, value] of entries) counts[sel] = value;
+    }
+  }
   let count = null;
   let rows = [];
   if (selector) {
