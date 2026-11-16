@@ -36,6 +36,8 @@ const DEFAULT_ROLE = 'main';
 const COMMANDS = [
   'ping', 'open', 'tabs', 'title', 'url', 'text', 'html', 'count',
   'list', 'links', 'click', 'scroll', 'press', 'assets', 'jsRead', 'jsWatch', 'jsClick', 'rect', 'activate', 'screenshot', 'restart',
+  // 协议 v2（2026-11-16）：一次往返取状态 / 条件等待 / 接口响应确认 / 极快健康检查
+  'health', 'probe', 'waitFor', 'netArm', 'netTake',
 ];
 const LIMITS = {
   open: 120000,
@@ -50,8 +52,45 @@ const LIMITS = {
   jsClick: 30000,
   rect: 30000,
   activate: 30000,
+  health: 5000,
+  probe: 30000,
+  waitFor: 12000,
+  netArm: 30000,
+  netTake: 30000,
   default: 30000,
 };
+/** ping 暴露的能力位：插件侧据此判断能否用新命令（老桥没有这个字段 → 走旧多调用路径） */
+const CAPABILITIES = Object.freeze([
+  'health', 'probe', 'waitFor', 'netArm', 'netTake', 'clickTimeout', 'clickNoScroll', 'openReuse',
+]);
+/** click：非 force 默认 3s，force 默认 1.5s；scrollIntoViewIfNeeded 只给 600ms */
+const CLICK_TIMEOUT_DEFAULT = 3000;
+const CLICK_TIMEOUT_FORCE_DEFAULT = 1500;
+const CLICK_TIMEOUT_MIN = 200;
+const CLICK_TIMEOUT_MAX = 15000;
+const CLICK_SCROLL_TIMEOUT = 600;
+/** health：单 role 一次 evaluate 的上限；probe/waitFor 的通用短上限 */
+const HEALTH_EVAL_TIMEOUT = 400;
+const READYSTATE_TIMEOUT = 800;
+const TITLE_FAST_TIMEOUT = 800;
+const PROBE_MAX_COUNTS = 8;
+const PROBE_MAX_ATTRS = 10;
+const WAIT_STATES = Object.freeze(['attached', 'detached', 'visible', 'hidden']);
+const WAIT_TIMEOUT_MIN = 50;
+const WAIT_TIMEOUT_MAX = 8000;
+const WAIT_TIMEOUT_DEFAULT = 2500;
+/** netArm/netTake：只记 url/method/status/seq/ts，不存 body */
+const NET_PATTERN_RE = /^[A-Za-z0-9_\-./?=&%:]{1,120}$/;
+const NET_MAX_PATTERNS = 8;
+const NET_MAX_EVENTS = 200;
+const NET_TAKE_MAX_WANT = 50;
+const NET_TAKE_MAX_EVENTS = 20;
+const NET_TAKE_TIMEOUT_MIN = 50;
+const NET_TAKE_TIMEOUT_MAX = 8000;
+const NET_TAKE_TIMEOUT_DEFAULT = 1200;
+const NET_TAKE_POLL_INTERVAL = 60;
+/** selector 静态校验上限（Playwright 引擎语法留给运行时；这里只挡空/超长/控制字符） */
+const SELECTOR_MAX_LEN = 512;
 const ALLOWED_HOSTS = new Set(['www.douyin.com', 'douyin.com', 'login.douyin.com']);
 
 let context = null;
