@@ -125,8 +125,9 @@ test('队列分道：watchQueue 忙时 watch 原语 skip:busy，userQueue 仍立
   const gate = new Promise((resolve) => { release = resolve })
   const s = setup({
     handlers: {
-      url: async () => {
-        await gate
+      url: async (payload) => {
+        // 只卡 dm role 的 url（status 走 main，不能被这个 gate 误伤）
+        if (payload?.role === 'dm') await gate
         return { ok: true, cmd: 'url', result: HOME }
       },
       count: () => ({ ok: true, cmd: 'count', result: 0 }),
