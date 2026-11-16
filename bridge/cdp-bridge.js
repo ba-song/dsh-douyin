@@ -38,6 +38,8 @@ const COMMANDS = [
   'list', 'links', 'click', 'scroll', 'press', 'assets', 'jsRead', 'jsWatch', 'jsClick', 'rect', 'activate', 'screenshot', 'restart',
   // 协议 v2（2026-11-16）：一次往返取状态 / 条件等待 / 接口响应确认 / 极快健康检查 / 桥内文本输入
   'health', 'probe', 'waitFor', 'netArm', 'netTake', 'type',
+  // 2026-11-16：按可见文字 hover（通知入口是 hover 展开，且 :has-text 选择器在本页极慢）
+  'hoverText',
 ];
 const LIMITS = {
   open: 120000,
@@ -1107,6 +1109,37 @@ async function cmdLinks(req) {
  * - 命中 0 个仍立即 E_SELECTOR_MISS；
  * - 成功返回 {ok:true,ms}（插件侧兼容布尔/对象两种）。
  */
+/**
+ * 按“可见文字”hover（协议 v2 追加，2026-11-16）。
+ * 为什么需要：抖音右上角「通知」是 hover 才展开的下拉；而 `:has-text()` 这类 Playwright 扩展选择器
+ * 在这个重页面上实测 >25s，不能用。这里用固定只读函数找「叶子节点文字完全相等」的元素，
+ * 取包围盒中心后 page.mouse.move 过去——不接收任意脚本，只接收一段纯文字。
+ */
+async function cmdHoverText(req) {
+  const role = roleOfRequest(req);
+  const p = await ensureRolePage(role);
+  const text = String(req.text === undefined || req.text === null ? '' : req.text).trim().slice(0, 40);
+  if (!text) throw badArg('hoverText needs text');
+  const nth = normalizeNth(req.nth);
+  const box = await p.evaluate(({ text, nth }) => {
+    const all = document.querySelectorAll('body *');
+    const hits = [];
+    for (const el of all) {
+      if (el.children && el.children.length) continue;
+      const t = String(el.textContent || '').trim();
+      if (t !== text) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      hits.push({ x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+      if (hits.length > 50) break;
+    }
+    return hits[nth] || null;
+  }, { text, nth });
+  if (!box) throw Object.assign(new Error(`E_TEXT_MISS: ${text}`), { code: 'E_TEXT_MISS' });
+  await p.mouse.move(box.x, box.y);
+  return { role, text, nth, x: box.x, y: box.y };
+}
+
 async function cmdClick(req) {
   const role = roleOfRequest(req);
   const p = await ensureRolePage(role);
@@ -1628,6 +1661,7 @@ async function dispatch(req) {
         case 'jsWatch': return await cmdJsWatch(req);
         case 'rect': return await cmdRect(req);
         case 'jsClick': return await cmdJsClick(req);
+        case 'hoverText': return await cmdHoverText(req);
         case 'links': return await cmdLinks(req);
         case 'click': return await cmdClick(req);
         case 'scroll': return await cmdScroll(req);
