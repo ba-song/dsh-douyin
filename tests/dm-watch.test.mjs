@@ -186,6 +186,20 @@ test('dm watcher：owner 事件标注；相对时间从“刚刚”→“1分钟
   assert.equal(w.status().selfSkipped, 1)
 })
 
+test('dm watcher：自己的消息（预览无「我：」前缀）由 service.isDmOutbound 过滤，不投 home', async () => {
+  // 2026-11-17 bug：预览不带前缀时 fromMe=false → 自己发的消息被反复投到 home。
+  // 修法：service 记录本插件刚发出的正文，watcher 用它过滤（键两边都剥前缀）。
+  const svc = makeService([{ ...OWNER_CONV }])
+  svc.isDmOutbound = (conv) => String(conv?.preview ?? '').trim() === '方向自检'
+  const w = createDmWatcher({ cfg: makeCfg(), service: svc })
+  await w.tick() // baseline
+  svc.items = [{ ...OWNER_CONV, preview: '方向自检', time: '刚刚' }]
+  assert.equal((await w.tick()).newCount, 0, 'confirmTicks=2 第一眼只进候选')
+  const r = await w.tick()
+  assert.equal(r.newCount, 0, '确认后仍应被 isDmOutbound 过滤')
+  assert.equal(w.status().selfSkipped, 1)
+})
+
 test('dm watcher：owner 判断兼容别名与列表里没带 isOwner 的 fake', async () => {
   const svc = makeService([{ id: 'dmc_dddddddddddd', index: 1, name: '陌生人', preview: '嗨', time: '刚刚' }])
   const w = createDmWatcher({ cfg: makeCfg(), service: svc })
