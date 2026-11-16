@@ -116,3 +116,104 @@ test('service：feed 首页归位仍是 main（不带 role）', async () => {
   assert.equal(open.role, undefined)
   cleanupDir(s.dir)
 })
+
+/** 让出事件循环，确保已排进队列的任务开始跑 */
+const tick = () => new Promise((resolve) => setImmediate(resolve))
+
+test('队列分道：watchQueue 忙时 watch 原语 skip:busy，userQueue 仍立即执行；queueStats 字段', async () => {
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const s = setup({
+    handlers: {
+      url: async () => {
+        await gate
+        return { ok: true, cmd: 'url', result: HOME }
+      },
+      count: () => ({ ok: true, cmd: 'count', result: 0 }),
+      list: () => ({ ok: true, cmd: 'list', result: [] }),
+      jsWatch: () => ({ ok: true, cmd: 'jsWatch', result: { action: 'start', seq: 1, cursor: 0, pending: 0, events: [] } }),
+    },
+    rawConfig: { minIntervalMs: 0 },
+  })
+
+  // 用 dmPollConversations（watchQueue）占住唯一的 watch 槽位
+  const busyPromise = s.runtime.service.dmPollConversations({ limit: 5 })
+  await tick()
+  const stats = s.runtime.service.queueStats()
+  assert.equal(stats.watchDepth, 1)
+  assert.equal(stats.watchMax, 1)
+  assert.equal(stats.watchAccepting, false)
+  assert.equal(stats.userDepth, 0)
+  assert.equal(stats.accepting, true)
+  assert.equal(stats.userMax, 8)
+  assert.equal(stats.maxQueue, 8)
+
+  // watch 原语忙 → {ok:true,skipped:true,reason:'busy'}（保持 tick 的 busy 语义，不抛 E_BUSY）
+  const skipped = await s.runtime.service.notifySourceStart()
+  assert.equal(skipped.ok, true)
+  assert.equal(skipped.skipped, true)
+  assert.equal(skipped.reason, 'busy')
+  assert.equal(skipped.code, 'E_BUSY')
+  assert.ok(skipped.retryAfterMs >= 300 && skipped.retryAfterMs <= 1500)
+
+  // 关键：watch 占着槽位时，userQueue 调用不能被卡住（分道前共用一个队列，会排队到 watcher 之后）
+  const status = await Promise.race([
+    s.runtime.service.status(),
+    new Promise((resolve) => setTimeout(() => resolve('BLOCKED'), 1000)),
+  ])
+  assert.notEqual(status, 'BLOCKED', 'userQueue 被 watchQueue 阻塞')
+  assert.equal(status.ok, true)
+
+  release()
+  const dm = await busyPromise
+  assert.equal(dm.ok, true)
+  assert.equal(s.runtime.service.queueStats().watchDepth, 0)
+  cleanupDir(s.dir)
+})
+
+test('队列背压：userQueue 满时 E_BUSY 带 retryAfterMs（300–1500ms），队列统计可见', async () => {
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const s = setup({
+    handlers: {
+      ping: async () => {
+        await gate
+        return { ok: true, cmd: 'ping', result: { proto: '1.0', browser: true, pages: 1 } }
+      },
+    },
+    rawConfig: { minIntervalMs: 0, maxQueue: 1 },
+  })
+  const first = s.runtime.service.status()
+  await tick()
+  const stats = s.runtime.service.queueStats()
+  assert.equal(stats.userDepth, 1)
+  assert.equal(stats.accepting, false)
+  assert.ok(stats.retryAfterMs >= 300 && stats.retryAfterMs <= 1500)
+
+  const second = await s.runtime.service.status()
+  assert.equal(second.ok, false)
+  assert.equal(second.code, 'E_BUSY')
+  assert.ok(second.retryAfterMs >= 300 && second.retryAfterMs <= 1500, `retryAfterMs=${second.retryAfterMs}`)
+
+  release()
+  const ok = await first
+  assert.equal(ok.ok, true)
+  assert.equal(s.runtime.service.queueStats().userDepth, 0)
+  cleanupDir(s.dir)
+})
+
+test('notifyRefreshForWatch 已注册进 service 包装（audit 缺陷 3），走 userQueue', async () => {
+  const s = setup({
+    handlers: {
+      url: () => ({ ok: true, cmd: 'url', result: HOME }),
+      open: () => ({ ok: true, cmd: 'open', result: { url: HOME, status: 200, title: '抖音' } }),
+    },
+    rawConfig: { minIntervalMs: 0 },
+  })
+  assert.equal(typeof s.runtime.service.notifyRefreshForWatch, 'function')
+  const r = await s.runtime.service.notifyRefreshForWatch()
+  assert.equal(r.ok, true)
+  const open = s.transport.calls.find((c) => c.cmd === 'open')
+  assert.equal(open.role, 'notify', '重载只碰 notify tab')
+  cleanupDir(s.dir)
+})
