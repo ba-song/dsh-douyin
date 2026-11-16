@@ -36,8 +36,8 @@ const DEFAULT_ROLE = 'main';
 const COMMANDS = [
   'ping', 'open', 'tabs', 'title', 'url', 'text', 'html', 'count',
   'list', 'links', 'click', 'scroll', 'press', 'assets', 'jsRead', 'jsWatch', 'jsClick', 'rect', 'activate', 'screenshot', 'restart',
-  // 协议 v2（2026-11-16）：一次往返取状态 / 条件等待 / 接口响应确认 / 极快健康检查
-  'health', 'probe', 'waitFor', 'netArm', 'netTake',
+  // 协议 v2（2026-11-16）：一次往返取状态 / 条件等待 / 接口响应确认 / 极快健康检查 / 桥内文本输入
+  'health', 'probe', 'waitFor', 'netArm', 'netTake', 'type',
 ];
 const LIMITS = {
   open: 120000,
@@ -1515,7 +1515,18 @@ async function dispatch(req) {
             const p = getRolePage(r);
             urls[r] = p ? p.url() : null;
           }
-          return { proto: '1.0', browser: browserAlive(), launching: Boolean(launching), pages, roles: liveRoles(), urls };
+          // 协议 v2 §A1：老字段全保留，新增 version/capabilities/crashed（老桥没有这三个字段）
+          return {
+            proto: '1.0',
+            version: '2',
+            browser: browserAlive(),
+            launching: Boolean(launching),
+            pages,
+            roles: liveRoles(),
+            urls,
+            capabilities: [...CAPABILITIES],
+            crashed: crashedRoles.keys(),
+          };
         }
         case 'open': return await cmdOpen(req);
         case 'tabs': {
@@ -1545,6 +1556,12 @@ async function dispatch(req) {
         case 'click': return await cmdClick(req);
         case 'scroll': return await cmdScroll(req);
         case 'press': return await cmdPress(req);
+        case 'type': return await cmdType(req);
+        case 'health': return await cmdHealth(req);
+        case 'probe': return await cmdProbe(req);
+        case 'waitFor': return await cmdWaitFor(req);
+        case 'netArm': return await cmdNetArm(req);
+        case 'netTake': return await cmdNetTake(req);
         case 'assets': return await cmdAssets(req);
         case 'screenshot': return await cmdScreenshot(req);
         case 'restart': return await cmdRestart();
@@ -1625,8 +1642,10 @@ const server = net.createServer((sock) => {
     if (!line) { finish({ ok: false, cmd: null, code: 'E_EMPTY', error: 'empty request' }); return; }
     let req;
     try { req = JSON.parse(line); } catch { finish({ ok: false, cmd: null, code: 'E_BAD_JSON', error: 'invalid json' }); return; }
-    if (req.cmd === 'ping') {
-      dispatch(req).then((result) => finish(result)).catch((error) => finish({ ok: false, cmd: 'ping', code: 'E_INTERNAL', error: String(error && error.message || error).slice(0, 300) }));
+    // ping/health 不进串行队列：health 要能在 30s 卡死命令期间也立刻回答（§A2 p95 < 200ms）
+    if (req.cmd === 'ping' || req.cmd === 'health') {
+      const fastCmd = String(req.cmd);
+      dispatch(req).then((result) => finish(result)).catch((error) => finish({ ok: false, cmd: fastCmd, code: 'E_INTERNAL', error: String(error && error.message || error).slice(0, 300) }));
       return;
     }
     pending += 1;

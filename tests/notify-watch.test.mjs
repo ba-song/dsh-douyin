@@ -134,17 +134,21 @@ function makeFakeService({
 }
 
 function makeCfg(over = {}) {
-  return normalizeConfig({
-    notifyWatchEnabled: true,
-    notifyWatchIntervalMs: 3000,
-    notifyWatchStartupDelayMs: 0,
-    notifyWatchBaselineRetryMs: 10000,
-    notifyWatchPanelMinGapMs: 3000,
-    notifyWatchMaxAgeMs: 24 * 60 * 60 * 1000,
-    dmOwnerAliases: ['饲养员', '草荧'],
-    dmOwnerFile: '',
+  // 注意：over 在 normalizeConfig 之后合并 —— watchBackoff*/watchBreaker*/notifyPanelPollMs 这些
+  // 2026-11-16 新增键由 corefix 并行加进 lib/config.js，本测试不依赖它们是否已存在。
+  return {
+    ...normalizeConfig({
+      notifyWatchEnabled: true,
+      notifyWatchIntervalMs: 3000,
+      notifyWatchStartupDelayMs: 0,
+      notifyWatchBaselineRetryMs: 10000,
+      notifyWatchPanelMinGapMs: 3000,
+      notifyWatchMaxAgeMs: 24 * 60 * 60 * 1000,
+      dmOwnerAliases: ['饲养员', '草荧'],
+      dmOwnerFile: '',
+    }),
     ...over,
-  })
+  }
 }
 
 function makeHome({ result = { ok: true }, throwError = null } = {}) {
@@ -311,11 +315,11 @@ test('jsWatch DOM 事件直接产出通知，不需要开面板', async () => {
   assert.equal(dm.newCount, 0)
 })
 
-test('panel 模式：每轮主动读 notify tab 面板；首轮基线，第二轮新条目产出事件', async () => {
+test('panel 模式：到 notifyPanelPollMs 才主动读面板；首轮基线，下一轮新条目产出事件', async () => {
   const clock = makeClock()
   const svc = makeFakeService({ items: [ownerItem()] })
   const w = createNotifyWatcher({
-    cfg: makeCfg({ notifyWatchSource: 'panel', notifyWatchPanelMinGapMs: 3000 }),
+    cfg: makeCfg({ notifyWatchSource: 'panel', notifyWatchPanelMinGapMs: 3000, notifyPanelPollMs: 5000 }),
     service: svc,
     clock: clock.now,
   })
@@ -326,8 +330,9 @@ test('panel 模式：每轮主动读 notify tab 面板；首轮基线，第二�
   assert.equal(svc.state.opens, 1)
   assert.equal(w.status().seen, 1)
   assert.equal(w.status().sourceMode, 'panel')
+  assert.equal(w.status().panelPollMs, 5000)
 
-  clock.advance(4000)
+  clock.advance(6000) // 过 notifyPanelPollMs(5s)
   svc.state.items.push(otherItem())
   const second = await w.tick()
   assert.equal(second.baseline, false)
@@ -335,9 +340,42 @@ test('panel 模式：每轮主动读 notify tab 面板；首轮基线，第二�
   assert.equal(second.events[0].id, otherItem().id)
   assert.equal(second.events[0].source, 'panel')
   assert.equal(svc.state.opens, 2)
+  assert.equal(w.status().panelPollsDue, 1)
   // panel 模式不依赖 badge/net，也不启动 jsWatch
   assert.equal(svc.state.started, 0)
   assert.equal(svc.state.taken, 0)
+})
+
+test('panel 模式：同一 tick / 间隔内不再无条件开面板（默认 60s 才主动读一次）', async () => {
+  const clock = makeClock()
+  const svc = makeFakeService({ items: [ownerItem()] })
+  const w = createNotifyWatcher({
+    cfg: makeCfg({ notifyWatchSource: 'panel' }), // 不传 notifyPanelPollMs → 默认 60000
+    service: svc,
+    clock: clock.now,
+  })
+  await w.tick() // baseline 开一次
+  const opensAfterBaseline = svc.state.opens
+  assert.equal(opensAfterBaseline, 1)
+  assert.equal(w.status().panelPollMs, 60000)
+
+  // 同一时刻连跑 4 轮（每轮之间只推进 1s，远小于 60s）：一轮都不该开面板
+  for (let i = 0; i < 4; i += 1) {
+    clock.advance(1000)
+    const r = await w.tick()
+    assert.equal(r.ok, true)
+    assert.equal(svc.state.opens, opensAfterBaseline, `第 ${i + 1} 轮不该开面板`)
+  }
+  assert.equal(w.status().panelPollsDue, 0)
+
+  // 到 60s 才到点：开一次，且只开一次
+  clock.advance(60000)
+  await w.tick()
+  assert.equal(svc.state.opens, opensAfterBaseline + 1)
+  assert.equal(w.status().panelPollsDue, 1)
+  clock.advance(1000)
+  await w.tick()
+  assert.equal(svc.state.opens, opensAfterBaseline + 1, '开过之后 60s 内不再开')
 })
 
 test('jsWatch net 触发：读后 5s 抑制自激；过最小间隔才开面板', async () => {
