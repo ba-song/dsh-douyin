@@ -578,3 +578,139 @@ test('旧 version:1 状态文件不兼容 → 忽略并重新建基线，不把�
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+/** 假 timers：记录 delay，测试可手动"到点"并 await 这一轮（含重新排期） */
+function makeTimers() {
+  const scheduled = []
+  const cleared = []
+  const timers = {
+    scheduled,
+    cleared,
+    setTimeout(fn, ms) {
+      const t = { fn, ms, unref() { return this } }
+      scheduled.push(t)
+      return t
+    },
+    clearTimeout(t) {
+      cleared.push(t)
+    },
+  }
+  timers.fire = async (t) => await t.fn()
+  return timers
+}
+
+test('失败退避：基线读取连续失败 → schedule 3s→6s；退避/熔断字段进 status()', async () => {
+  const timers = makeTimers()
+  const clock = makeClock()
+  const svc = makeFakeService({ unsafe: true })
+  const w = createNotifyWatcher({
+    cfg: makeCfg({
+      notifyWatchStartupDelayMs: 0,
+      notifyWatchBaselineRetryMs: 5000,
+      watchBackoffMinMs: 3000,
+      watchBackoffMaxMs: 60000,
+      watchBackoffFactor: 2,
+    }),
+    service: svc,
+    timers,
+    clock: clock.now,
+  })
+  assert.equal(w.start(), true)
+  assert.equal(timers.scheduled[0].ms, 0)
+
+  let out = await timers.fire(timers.scheduled[0])
+  assert.equal(out.result.failed, true)
+  assert.equal(out.result.code, 'E_PAGE_UNSAFE')
+  assert.equal(out.nextDelayMs, 3000)
+  let st = w.status()
+  assert.equal(st.fails, 1)
+  assert.equal(st.backoffMs, 3000)
+  assert.equal(st.breakerOpen, false)
+  assert.equal(st.lastCode, 'E_PAGE_UNSAFE')
+  assert.equal(st.lastFailCode, 'E_PAGE_UNSAFE')
+  assert.ok(st.nextTickAt > clock.now())
+  assert.equal(st.backoff.minMs, 3000)
+  assert.equal(st.backoff.factor, 2)
+
+  clock.advance(6000) // 过 baselineRetryMs(5s)，再失败一次
+  out = await timers.fire(timers.scheduled.at(-1))
+  assert.equal(out.nextDelayMs, 6000)
+  st = w.status()
+  assert.equal(st.fails, 2)
+  assert.equal(st.backoffMs, 6000)
+
+  // 非失败类错误（角标未命中）不改退避状态
+  const svc2 = makeFakeService()
+  const timers2 = makeTimers()
+  const w2 = createNotifyWatcher({
+    cfg: makeCfg({ notifyWatchStartupDelayMs: 0, watchBreakerFails: 3 }),
+    service: svc2,
+    timers: timers2,
+    clock: clock.now,
+  })
+  w2.start()
+  await timers2.fire(timers2.scheduled[0])
+  svc2.state.badge = { ok: false, code: 'E_BADGE_MISS', available: false }
+  const neutral = await timers2.fire(timers2.scheduled.at(-1))
+  assert.equal(w2.status().fails, 0, '角标未命中（非失败类）不累计退避失败')
+  assert.equal(w2.status().backoffMs, 0)
+  assert.equal(neutral.nextDelayMs, 3000)
+  w.stop()
+  w2.stop()
+})
+
+test('崩溃感知（panel 模式）：E_REMOTE_IO + Target crashed → status 记录 health 探测结果', async () => {
+  const clock = makeClock()
+  const svc = {
+    async notifySnapshotForWatch() {
+      return { ok: false, code: 'E_REMOTE_IO', message: 'locator.count: Target crashed', open: false, items: [] }
+    },
+  }
+  const log = makeLogger()
+  const healthCalls = []
+  const bridge = {
+    async health() {
+      healthCalls.push('health')
+      return { browser: true, pages: 3, roles: { notify: { renderer: 'crashed' }, main: { renderer: 'ok' } } }
+    },
+  }
+  const w = createNotifyWatcher({
+    cfg: makeCfg({ notifyWatchSource: 'panel' }),
+    service: svc,
+    log,
+    clock: clock.now,
+    bridge,
+  })
+  const r = await w.tick()
+  assert.equal(r.failed, true)
+  assert.equal(r.code, 'E_REMOTE_IO')
+  const st = w.status()
+  assert.equal(st.healthProbes, 1)
+  assert.equal(st.healthSkipped, 0)
+  assert.equal(healthCalls.length, 1)
+  assert.deepEqual(st.lastHealth, { browser: true, pages: 3, roles: { notify: 'crashed', main: 'ok' } })
+  assert.ok(log.lines.some(([lvl, m]) => lvl === 'warn' && m.includes('页面崩溃') && m.includes('已请求健康检查')))
+  assert.equal(st.hasBridge, true)
+  assert.equal(st.breakerOpen, false, '单次崩溃不熔断（熔断由 schedule 侧累计）')
+})
+
+test('崩溃感知：没有 bridge 依赖时跳过 health，只记日志', async () => {
+  const clock = makeClock()
+  const svc = makeFakeService()
+  const log = makeLogger()
+  const w = createNotifyWatcher({
+    cfg: makeCfg({ notifyWatchSource: 'panel' }),
+    service: svc,
+    log,
+    clock: clock.now,
+  })
+  const original = svc.notifySnapshotForWatch
+  svc.notifySnapshotForWatch = async () => ({ ok: false, code: 'E_REMOTE_IO', message: 'Target crashed', open: false, items: [] })
+  const r = await w.tick()
+  svc.notifySnapshotForWatch = original
+  assert.equal(r.failed, true)
+  assert.equal(w.status().healthProbes, 1)
+  assert.equal(w.status().healthSkipped, 1)
+  assert.deepEqual(w.status().lastHealth, null)
+  assert.ok(log.lines.some(([lvl, m]) => lvl === 'warn' && m.includes('已请求健康检查')))
+})
