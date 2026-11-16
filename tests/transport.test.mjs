@@ -84,11 +84,12 @@ test('pressKey：默认先聚焦再按键；只允许 z/x/c，不拼任意按键
 test('pasteText：文本走 stdin 写临时文件，再 xclip + ctrl+v（不拼中文到 shell）', async () => {
   const { dir, spawnImpl, transport } = setupSpawn()
   await transport.pasteText('中文粘贴测试')
-  assert.equal(spawnImpl.calls.length, 2)
-  const writeCmd = spawnImpl.calls[0].args[spawnImpl.calls[0].args.length - 1]
+  assert.equal(spawnImpl.calls.length, 3)
+  assert.match(spawnImpl.calls[0].args[spawnImpl.calls[0].args.length - 1], /command -v xclip/)
+  const writeCmd = spawnImpl.calls[1].args[spawnImpl.calls[1].args.length - 1]
   assert.match(writeCmd, /cat > '\/tmp\/dsh-douyin-clip.txt'/)
-  assert.equal(spawnImpl.calls[0].child.stdin.written, '中文粘贴测试')
-  const pasteCmd = spawnImpl.calls[1].args[spawnImpl.calls[1].args.length - 1]
+  assert.equal(spawnImpl.calls[1].child.stdin.written, '中文粘贴测试')
+  const pasteCmd = spawnImpl.calls[2].args[spawnImpl.calls[2].args.length - 1]
   assert.match(pasteCmd, /xclip -selection clipboard -i/)
   assert.match(pasteCmd, /xdotool key --clearmodifiers ctrl\+v/)
   assert.match(pasteCmd, /rm -f/)
