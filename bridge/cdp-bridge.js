@@ -1001,11 +1001,19 @@ async function cmdLinks(req) {
   return out;
 }
 
+/**
+ * 协议 v2 §A6：
+ * - timeoutMs 默认 3000（force 默认 1500），夹 200..15000，替代硬编码 15000；
+ * - scroll 默认 true 但只给 600ms（fixed/零尺寸元素不再白等 3s），scroll:false 时跳过；
+ * - 命中 0 个仍立即 E_SELECTOR_MISS；
+ * - 成功返回 {ok:true,ms}（插件侧兼容布尔/对象两种）。
+ */
 async function cmdClick(req) {
   const role = roleOfRequest(req);
   const p = await ensureRolePage(role);
-  const selector = String(req.selector || '');
-  if (!selector) throw Object.assign(new Error('E_BAD_SELECTOR'), { code: 'E_BAD_SELECTOR' });
+  const rawSelector = String(req.selector || '');
+  if (!selectorOk(rawSelector)) throw Object.assign(new Error('E_BAD_SELECTOR'), { code: 'E_BAD_SELECTOR' });
+  const selector = rawSelector.trim();
   const loc = p.locator(selector);
   const count = await loc.count();
   if (count === 0) throw Object.assign(new Error('E_SELECTOR_MISS'), { code: 'E_SELECTOR_MISS' });
@@ -1016,14 +1024,20 @@ async function cmdClick(req) {
     if (nth >= count) throw Object.assign(new Error(`E_INDEX: nth=${nth} count=${count}`), { code: 'E_INDEX' });
     target = loc.nth(nth);
   }
-  // 滚动进视口只是尽力而为：零尺寸/fixed 的图标会在这里卡到超时，不该挡住点击本身
-  try {
-    await target.scrollIntoViewIfNeeded({ timeout: 3000 });
-  } catch {}
   const force = Boolean(req.force);
+  const timeoutMs = clampInt(req.timeoutMs, CLICK_TIMEOUT_MIN, CLICK_TIMEOUT_MAX,
+    force ? CLICK_TIMEOUT_FORCE_DEFAULT : CLICK_TIMEOUT_DEFAULT);
+  const scroll = req.scroll !== false;
+  const started = Date.now();
+  // 滚动进视口只是尽力而为：零尺寸/fixed 的图标会在这里卡到超时，不该挡住点击本身
+  if (scroll) {
+    try {
+      await target.scrollIntoViewIfNeeded({ timeout: CLICK_SCROLL_TIMEOUT });
+    } catch {}
+  }
   try {
-    await target.click({ force, timeout: force ? 5000 : 15000 });
-    return true;
+    await target.click({ force, timeout: timeoutMs });
+    return { ok: true, ms: Date.now() - started };
   } catch (error) {
     if (!force) throw error;
   }
@@ -1031,7 +1045,7 @@ async function cmdClick(req) {
   // 不用任意 JS：Playwright 的 dispatchEvent 只派发一个 click 事件
   const dispatched = await target.dispatchEvent('click').then(() => true).catch(() => false);
   if (!dispatched) throw Object.assign(new Error('E_CLICK_FAILED'), { code: 'E_CLICK_FAILED' });
-  return true;
+  return { ok: true, ms: Date.now() - started, dispatched: true };
 }
 
 async function cmdScroll(req) {
