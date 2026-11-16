@@ -632,7 +632,7 @@ test('失败退避：基线读取连续失败 → schedule 3s→6s；退避/熔�
   assert.equal(st.backoff.minMs, 3000)
   assert.equal(st.backoff.factor, 2)
 
-  clock.advance(6000) // 过 baselineRetryMs(5s)，再失败一次
+  clock.advance(11000) // 过 baselineRetryMs（watcher 内下限 10s），再失败一次
   out = await timers.fire(timers.scheduled.at(-1))
   assert.equal(out.nextDelayMs, 6000)
   st = w.status()
