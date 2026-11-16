@@ -851,8 +851,12 @@ test('bridge 新命令：scroll/press/click 参数校验与命令白名单', asy
   await assert.rejects(s.runtime.bridge.click('div.x', { nth: -1 }), (e) => e.code === 'E_BAD_ARG')
 
   assert.equal(await s.runtime.bridge.scroll(700), true)
-  assert.equal(await s.runtime.bridge.press('Escape'), true)
-  assert.equal(await s.runtime.bridge.click('div.search-result-card', { nth: 1 }), true)
+  // 协议 v2 §A10：press 返回 {ok,key,inputFocused}（对象是 truthy，旧调用仍然成立）
+  const pressed = await s.runtime.bridge.press('Escape')
+  assert.equal(pressed?.ok, true)
+  assert.equal(pressed?.key, 'Escape')
+  const clicked = await s.runtime.bridge.click('div.search-result-card', { nth: 1 })
+  assert.equal(clicked?.ok, true)
   assert.deepEqual(
     s.transport.calls.map((c) => c.cmd),
     ['scroll', 'press', 'click'],
