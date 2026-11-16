@@ -212,9 +212,26 @@ test('notifyRefreshForWatch 已注册进 service 包装（audit 缺陷 3），�
     rawConfig: { minIntervalMs: 0 },
   })
   assert.equal(typeof s.runtime.service.notifyRefreshForWatch, 'function')
+  // 2026-11-17：已在主站类页面时只做 URL 检查、不做 7–9s 重导航（否则 15s 一次会把全局串行链占满）
+  const r = await s.runtime.service.notifyRefreshForWatch()
+  assert.equal(r.ok, true)
+  assert.equal(r.skipped, 'homeish')
+  assert.equal(s.transport.calls.find((c) => c.cmd === 'open'), undefined, '主站类页面不应导航')
+  cleanupDir(s.dir)
+})
+
+test('notifyRefreshForWatch：notify tab 漂到视频页时才 open 回首页（只碰 notify tab）', async () => {
+  const s = setup({
+    handlers: {
+      url: () => ({ ok: true, cmd: 'url', result: 'https://www.douyin.com/video/7558343112453410106' }),
+      open: () => ({ ok: true, cmd: 'open', result: { url: HOME, status: 200, title: '抖音' } }),
+    },
+    rawConfig: { minIntervalMs: 0 },
+  })
   const r = await s.runtime.service.notifyRefreshForWatch()
   assert.equal(r.ok, true)
   const open = s.transport.calls.find((c) => c.cmd === 'open')
+  assert.ok(open, '视频页应导航回首页')
   assert.equal(open.role, 'notify', '重载只碰 notify tab')
   cleanupDir(s.dir)
 })

@@ -3,7 +3,16 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PNG, cleanupDir, detailOf, makeClock, makeFakeMemory, makeMp4, makeTmpDir, setup } from './helpers.mjs'
-import { detectToggleActive, dmConversationId, parseModalId, parseNotifyItems, parseVideoIdFromUrl, parseVideoItems, pickNotifyTarget, TOGGLE_STATE_ATTR } from '../lib/service.js'
+import { detectToggleActive, dmConversationId, dmPreviewText, parseModalId, parseNotifyItems, parseVideoIdFromUrl, parseVideoItems, pickNotifyTarget, TOGGLE_STATE_ATTR } from '../lib/service.js'
+
+test('dmPreviewText：预览剥掉「我：」前缀（全角/半角），用于识别自己发的私信', () => {
+  assert.equal(dmPreviewText('我：晚安'), '晚安')
+  assert.equal(dmPreviewText('我: 晚安'), '晚安')
+  assert.equal(dmPreviewText('我：'), '')
+  assert.equal(dmPreviewText('晚安'), '晚安')
+  assert.equal(dmPreviewText('  我：  多  空格  '), '多 空格')
+  assert.equal(dmPreviewText(null), '')
+})
 
 test('parseModalId：从 URL 查询/哈希中取 6–20 位 modal_id', () => {
   assert.equal(parseModalId('https://www.douyin.com/search/x?modal_id=123456789&type=general'), '123456789')
