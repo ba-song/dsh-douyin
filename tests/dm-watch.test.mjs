@@ -141,15 +141,12 @@ test('dm watcher：owner 事件标注；相对时间从“刚刚”→“1分钟
   assert.equal(r.events[0].text, '新的消息')
   assert.equal(r.events[0].time, '1分钟前')
 
-  // 自己的预览（“我：”）只做 best-effort fromMe，不改变 owner
+  // 自己的预览（“我：”）确认后直接跳过，不投 home；stats.selfSkipped 记一笔
   svc.items = [{ ...OWNER_CONV, time: '1分钟前', preview: '我：晚安' }]
   assert.equal((await w.tick()).newCount, 0)
   r = await w.tick()
-  assert.equal(r.newCount, 1)
-  assert.equal(r.events[0].fromMe, true)
-  assert.equal(r.events[0].sender, 'me')
-  assert.equal(r.events[0].text, '晚安')
-  assert.equal(r.events[0].owner, true)
+  assert.equal(r.newCount, 0)
+  assert.equal(w.status().selfSkipped, 1)
 })
 
 test('dm watcher：owner 判断兼容别名与列表里没带 isOwner 的 fake', async () => {
