@@ -714,3 +714,34 @@ test('崩溃感知：没有 bridge 依赖时跳过 health，只记日志', async
   assert.deepEqual(w.status().lastHealth, null)
   assert.ok(log.lines.some(([lvl, m]) => lvl === 'warn' && m.includes('已请求健康检查')))
 })
+
+test('重复 @提及：同一分钟只投一次；隔几分钟的新 @ 会重新投（不再被永久 seen 吞掉）', async () => {
+  const svc = makeService()
+  const home = makeHome()
+  const clock = makeClock()
+  const cfg = makeCfg({ notifyWatchSource: 'panel', notifyPanelPollMs: 5000 })
+  const w = createNotifyWatcher({ cfg, service: svc, ctx: makeCtx(home), clock })
+  // 基线：先把当前 @ 记为历史
+  svc.state.panelOpen = true
+  svc.state.items = [ownerItem({ id: 'ntf_owner', time: '刚刚', ageMs: 0 })]
+  await w.tick()
+  assert.equal(home.calls.length, 0, '基线不投')
+
+  // 5 分钟后主人的新 @提及（同样的 actor/text/time 标签"刚刚"）——修 bug 前会被永久吞掉
+  clock.advance(5 * 60 * 1000)
+  svc.state.items = [ownerItem({ id: 'ntf_owner', time: '刚刚', ageMs: 0 })]
+  assert.equal((await w.tick()).newCount, 0, 'panel 间隔未到（5000ms）不开面板')
+  clock.advance(6000)
+  const r = await w.tick()
+  assert.equal(r.newCount, 1, '隔 5 分钟的新 @ 必须投递')
+  assert.equal(home.calls.length, 1)
+  assert.equal(home.calls[0].channel, 'douyin')
+
+  // 同一分钟内再 tick：同一条不能重复投
+  clock.advance(3000)
+  svc.state.items = [ownerItem({ id: 'ntf_owner', time: '刚刚', ageMs: 0 })]
+  const r2 = await w.tick()
+  assert.equal(r2.newCount, 0)
+  assert.equal(home.calls.length, 1)
+  assert.ok(w.status().recentDupeSkipped >= 1)
+})
