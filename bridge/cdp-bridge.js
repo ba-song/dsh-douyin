@@ -583,8 +583,35 @@ async function launchBrowser() {
  * 取某个 role 的 page；不存在（被用户关掉/首次创建）才新建，绝不碰其他 role。
  * main 迁移/回收后也走这里，但不自动导航；notify/dm 新建时补默认 URL。
  */
+/**
+ * 2026-11-17：清理"同一个 role 有多个活 page"的孤儿 tab（实测出现过两个 /chat 都属于 dm）。
+ * 只关**桥自己管理**的重复 role 页（roleByPage 里有、且不是 pageByRole 当前指向的那个），
+ * 不动用户手动打开的普通 tab。
+ */
+async function pruneDuplicateRolePages() {
+  if (!context) return 0;
+  let closed = 0;
+  try {
+    for (const p of context.pages()) {
+      const role = roleByPage.get(p);
+      if (!role) continue;
+      if (pageByRole.get(role) === p) continue;
+      try {
+        roleByPage.delete(p);
+        await p.close();
+        closed += 1;
+        log(`closed duplicate role page role=${role}`);
+      } catch (error) {
+        log(`close duplicate role page failed role=${role}: ${String(error && error.message || error).slice(0, 120)}`);
+      }
+    }
+  } catch {}
+  return closed;
+}
+
 async function ensureRolePage(role) {
   await ensureBrowser();
+  await pruneDuplicateRolePages();
   let p = getRolePage(role);
   if (p) return p;
   if (crashedRoles.has(role)) log(`role=${role} rebuilding after crash at=${crashedRoles.at(role)}`);
@@ -1640,6 +1667,7 @@ async function dispatch(req) {
         case 'open': return await cmdOpen(req);
         case 'tabs': {
           await ensureBrowser();
+          await pruneDuplicateRolePages();
           const pages = context.pages();
           const out = [];
           for (let i = 0; i < pages.length; i += 1) {
