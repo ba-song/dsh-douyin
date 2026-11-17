@@ -746,3 +746,50 @@ test('重复 @提及：同一分钟内不重复投；隔几分钟的新 @ 会重
   assert.equal(r3.newCount, 1, '10 分钟后的又一次 @ 必须投递')
   assert.equal(home.calls.length, 2)
 })
+
+test('重启补投：首轮把 catchUp 窗口内没投过的旧通知补一次；之后不再重复', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'notify-catchup-'))
+  const stateFile = join(dir, 'seen.json')
+  writeFileSync(stateFile, JSON.stringify({ version: 2, primed: true, baselineAt: 1, seen: [], delivered: {} }))
+  const cfg = makeCfg({
+    notifyWatchSource: 'panel',
+    notifyPanelPollMs: 5000,
+    notifyWatchMaxAgeMs: 10 * 60 * 1000,
+    notifyCatchUpMaxAgeMs: 6 * 60 * 60 * 1000,
+    notifyWatchStateFile: stateFile,
+  })
+  const svc = makeFakeService({ panelOpen: true, items: [ownerItem({ id: 'ntf_owner', time: '18:48', ageMs: 20 * 60 * 1000 })] })
+  const home = makeHome()
+  const clock = makeClock()
+  const w = createNotifyWatcher({ cfg, service: svc, ctx: makeCtx(home), clock: clock.now })
+  const r1 = await w.tick()
+  assert.equal(r1.newCount, 1, '20 分钟前的 @ 超出常规 10 分钟窗口，但补投窗口内应投一次')
+  assert.equal(home.calls.length, 1)
+
+  clock.advance(3000)
+  const r2 = await w.tick()
+  assert.equal(r2.newCount, 0, '补投后不重复')
+  assert.equal(home.calls.length, 1)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('重启补投关闭（catchUp=0）时，超出常规窗口的旧通知不投', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'notify-nocatchup-'))
+  const stateFile = join(dir, 'seen.json')
+  writeFileSync(stateFile, JSON.stringify({ version: 2, primed: true, baselineAt: 1, seen: [], delivered: {} }))
+  const cfg = makeCfg({
+    notifyWatchSource: 'panel',
+    notifyPanelPollMs: 5000,
+    notifyWatchMaxAgeMs: 10 * 60 * 1000,
+    notifyCatchUpMaxAgeMs: 0,
+    notifyWatchStateFile: stateFile,
+  })
+  const svc = makeFakeService({ panelOpen: true, items: [ownerItem({ id: 'ntf_owner', time: '18:48', ageMs: 20 * 60 * 1000 })] })
+  const home = makeHome()
+  const clock = makeClock()
+  const w = createNotifyWatcher({ cfg, service: svc, ctx: makeCtx(home), clock: clock.now })
+  const r = await w.tick()
+  assert.equal(r.newCount, 0)
+  assert.equal(home.calls.length, 0)
+  rmSync(dir, { recursive: true, force: true })
+})
