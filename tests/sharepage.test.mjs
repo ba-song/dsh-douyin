@@ -50,6 +50,19 @@ const NOTE_ITEM = {
   ],
 }
 
+// 实测形态：图集的 play_addr 被 playwm 端点包成 `?video_id=<urlencoded mp3>`
+const NOTE_ITEM_WRAPPED_AUDIO = {
+  ...NOTE_ITEM,
+  video: {
+    play_addr: {
+      uri: 'https://lf26-music-east.douyinstatic.com/obj/ies-music-hj/767.mp3',
+      url_list: [
+        'https://aweme.snssdk.com/aweme/v1/playwm/?video_id=https%3A%2F%2Flf26-music-east.douyinstatic.com%2Fobj%2Fies-music-hj%2F7670055808746507067.mp3&ratio=720p&line=0',
+      ],
+    },
+  },
+}
+
 function shareHtml(item) {
   const payload = {
     loaderData: {
@@ -118,6 +131,11 @@ test('mediaFromShareItem：视频出 uri 候选；图集出图片且不把背景
   assert.equal(note.kind, 'gallery')
   assert.equal(note.images.length, 2)
   assert.equal(note.playUrls.length, 0, '图集的 play_addr 是 mp3，必须过滤')
+  assert.equal(
+    mediaFromShareItem(NOTE_ITEM_WRAPPED_AUDIO).playUrls.length,
+    0,
+    '被 playwm 端点包起来的 mp3 也要过滤',
+  )
   assert.ok(!note.images[0].includes('-water:'), '优先选不带水印标记的图')
 
   assert.equal(
