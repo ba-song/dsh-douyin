@@ -141,18 +141,29 @@ test('notifySnapshotForWatch：Escape 不关面板时用通知入口切换关闭
   cleanupDir(f.s.dir)
 })
 
-test('notifySnapshotForWatch：视频页/私信页/非抖音页 → E_PAGE_UNSAFE，不导航不开面板', async () => {
+test('notifySnapshotForWatch：视频/模态页 → E_PAGE_UNSAFE（不抢页面）', async () => {
   for (const url of [
     'https://www.douyin.com/video/7707903837473934632',
     'https://www.douyin.com/jingxuan?modal_id=7707903837473934632',
-    'https://www.douyin.com/chat',
-    'https://example.com/',
   ]) {
     const f = makeFixture({ firstUrl: url })
     const r = await f.s.runtime.rawService.notifySnapshotForWatch({ allowOpen: true, limit: 20 })
     assert.equal(r.ok, false, url)
     assert.equal(r.code, 'E_PAGE_UNSAFE', url)
     assert.equal(f.clicks.length, 0, url)
+    cleanupDir(f.s.dir)
+  }
+})
+
+test('notifySnapshotForWatch：非抖音/私信页 → notify tab 自我归位后开面板（2026-11-17 修复）', async () => {
+  // notify 是专用 tab：启动瞬间的 about:blank / 残留 /chat 会导致 watcher 永远 E_PAGE_UNSAFE，
+  // 现在会自动导航回首页再开面板；视频/modal 页仍然不抢（上一条测试）。
+  for (const url of ['https://www.douyin.com/chat', 'about:blank']) {
+    const f = makeFixture({ firstUrl: url })
+    const r = await f.s.runtime.rawService.notifySnapshotForWatch({ allowOpen: true, limit: 20 })
+    assert.equal(r.ok, true, url)
+    assert.equal(r.open, true, url)
+    assert.ok(f.clicks.some((c) => String(c.selector).includes('open') || String(c.selector).includes('something-button') || String(c.selector).includes('通知') || String(c.selector).includes('listDlg')), '应尝试打开面板')
     cleanupDir(f.s.dir)
   }
 })
