@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PNG, cleanupDir, detailOf, makeClock, makeFakeMemory, makeMp4, makeTmpDir, setup } from './helpers.mjs'
-import { detectToggleActive, dmConversationId, dmPreviewText, parseDmConversationRows, parseModalId, parseNotifyItems, parseVideoIdFromUrl, parseVideoItems, pickNotifyTarget, TOGGLE_STATE_ATTR } from '../lib/service.js'
+import { detectToggleActive, parseCommentAgeMs, dmConversationId, dmPreviewText, parseDmConversationRows, parseModalId, parseNotifyItems, parseVideoIdFromUrl, parseVideoItems, pickNotifyTarget, TOGGLE_STATE_ATTR } from '../lib/service.js'
 
 test('dmPreviewText：预览剥掉「我：」前缀（全角/半角），用于识别自己发的私信', () => {
   assert.equal(dmPreviewText('我：晚安'), '晚安')
@@ -29,6 +29,16 @@ test('parseDmConversationRows：一次 list 的 innerText 解析成 名称/时�
   // 只有名称（行数 < 2）→ 返回 null，调用方回退老路径
   assert.equal(parseDmConversationRows([{ text: '只有名字' }]), null)
   assert.equal(parseDmConversationRows([]), null)
+})
+
+test('parseCommentAgeMs：支持当天 HH:MM（面板会把"刚刚"退化成绝对时间）', () => {
+  const now = Date.parse('2026-11-17T19:05:00+08:00')
+  assert.equal(parseCommentAgeMs('18:48', now), 17 * 60 * 1000)
+  assert.equal(parseCommentAgeMs('19:02', now), 3 * 60 * 1000)
+  assert.equal(parseCommentAgeMs('刚刚', now), 0)
+  // 未来的时间（刚过零点）算昨天
+  assert.equal(parseCommentAgeMs('23:59', now), 23 * 60 * 1000 - 6 * 60 * 1000 + 24 * 60 * 60 * 1000 - 17 * 60 * 1000 + 17 * 60 * 1000 - (24 * 60 - 6) * 60 * 1000 + (24 * 60 - 6) * 60 * 1000)
+  assert.equal(parseCommentAgeMs('昨天', now), null)
 })
 
 test('parseModalId：从 URL 查询/哈希中取 6–20 位 modal_id', () => {
