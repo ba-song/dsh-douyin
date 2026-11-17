@@ -716,11 +716,11 @@ test('崩溃感知：没有 bridge 依赖时跳过 health，只记日志', async
 })
 
 test('重复 @提及：同一分钟只投一次；隔几分钟的新 @ 会重新投（不再被永久 seen 吞掉）', async () => {
-  const svc = makeService()
+  const svc = makeFakeService({ panelOpen: true, items: [ownerItem()] })
   const home = makeHome()
   const clock = makeClock()
   const cfg = makeCfg({ notifyWatchSource: 'panel', notifyPanelPollMs: 5000 })
-  const w = createNotifyWatcher({ cfg, service: svc, ctx: makeCtx(home), clock })
+  const w = createNotifyWatcher({ cfg, service: svc, ctx: makeCtx(home), clock: clock.now })
   // 基线：先把当前 @ 记为历史
   svc.state.panelOpen = true
   svc.state.items = [ownerItem({ id: 'ntf_owner', time: '刚刚', ageMs: 0 })]
