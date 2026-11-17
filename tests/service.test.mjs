@@ -36,8 +36,8 @@ test('parseCommentAgeMs：支持当天 HH:MM（面板会把"刚刚"退化成绝�
   assert.equal(parseCommentAgeMs('18:48', now), 17 * 60 * 1000)
   assert.equal(parseCommentAgeMs('19:02', now), 3 * 60 * 1000)
   assert.equal(parseCommentAgeMs('刚刚', now), 0)
-  // 未来的时间（刚过零点）算昨天
-  assert.equal(parseCommentAgeMs('23:59', now), 23 * 60 * 1000 - 6 * 60 * 1000 + 24 * 60 * 60 * 1000 - 17 * 60 * 1000 + 17 * 60 * 1000 - (24 * 60 - 6) * 60 * 1000 + (24 * 60 - 6) * 60 * 1000)
+  // 未来的时间（刚过零点）：算昨天（+24h）
+  assert.equal(parseCommentAgeMs('23:59', now), 19 * 3600 * 1000 + 6 * 60 * 1000) // 19:05 → 23:59 是未来，按昨天算 = 19h06m
   assert.equal(parseCommentAgeMs('昨天', now), null)
 })
 
