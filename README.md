@@ -418,3 +418,31 @@ bash /root/.dsh/plugin-src/dsh-douyin/bridge/deploy.sh
 bash /root/.dsh/plugin-src/dsh-douyin/bridge/restart.sh   # 见 bridge-report.md §6
 # 插件：主人手动重启 DSH App（profile 未改；插件代码已同步）
 ```
+
+## 2026-11-17 主人两项新要求
+
+### 1. 风控（短信验证）→ 通知主人 + 主人给码后填入
+
+- **触发**：写操作命中风控墙（`writeBlockedSelectors` 命中 `verify_sms`/`login-full-panel`/`captcha`）时，
+  以及评论提交后回读失败且验证面板仍在时，调用 `notifyOwner`：
+  - 通道：`dyChannel.sendText`（QQ，`mode=send` 才发）→ 失败自动回退 `dyMail.send`（邮件）；
+  - 节流：`riskNotifyMinGapMs`（默认 10 分钟）内同一条通知只发一次；
+  - 内容：场景 + 视频 id + 明确说明「不绕过验证，请把验证码回给汐，她用 `dy_douyin_sms_code` 填入」。
+  - 配置：`riskNotifyEnabled`（默认 true）、`ownerQqId`（默认 2971030080）、`riskNotifyChannel`（qq/email/both）、`riskNotifyEmail`。
+- **填入验证码**：新工具 `dy_douyin_sms_code({code, confirm:true})`
+  - 只在"当前确实有验证面板"时工作（否则 `E_NOT_FOUND`）；
+  - 找输入框（`[class*="verify_sms"] input` 等白名单）→ 桥内 `type` 填码 → 点「验证」→ 轮询面板消失；
+  - 面板仍在 → `E_UNVERIFIED`（码错/过期，让主人重发），**不重试、不猜码**。
+
+### 2. 抖音渠道会话也能用抖音工具（白名单）
+
+- 门禁从"owner/home"扩成三级：`owner`（主人/她的家，全部工具）/ `channel`（`channelCwds`，默认
+  `/sdcard/DSHA/渠道/douyin`，只给白名单子集）/ `none`。
+- `channelToolAllowlist` 默认：status/feed/search/open/comments/screenshot/download/watch、
+  dm_list/dm_read/dm_send/dm_watch、notify_list/notify_reply、sms_code。
+  **点赞/收藏/评论/评论删除/评论回复仍限 owner/home**（避免把主动写权限扩散到可能由陌生人触发的会话）。
+- 子智能体/委派会话仍然一律 `none`。
+
+### 新增配置
+`channelCwds`、`channelToolAllowlist`、`riskNotifyEnabled`、`ownerQqId`、`riskNotifyMinGapMs`、
+`riskNotifyEmail`、`riskNotifyChannel`。
