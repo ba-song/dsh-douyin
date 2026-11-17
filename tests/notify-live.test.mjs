@@ -85,8 +85,8 @@ function makeFixture({ firstUrl = 'https://www.douyin.com/jingxuan', panelOpen =
     setOpen: (v) => { open = v },
     setBadge: (n) => { badgeCount = n },
     clock,
-    // 新通知在"3 分钟后"到达（est 差 180s > 判重窗口 120s），避免同一时钟下被当成同一条
-    addRow: (text) => { clock.advance(180000); rows.splice(Math.max(0, rows.length - 1), 0, { text }) },
+    // 新增一行（与基线里已有的 actor/text 不同 → est 无历史，必投）
+    addRow: (text) => { rows.splice(Math.max(0, rows.length - 1), 0, { text }) },
     clicks,
     presses,
     setUrl: (u) => { url = u },
