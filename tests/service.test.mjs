@@ -1260,7 +1260,7 @@ test('download：html 为空时回退 list(video source)', async () => {
   cleanupDir(dlDir)
 })
 
-test('download：拿不到媒体流 → E_NO_MEDIA，提示手动保存，不调用 fetch', async () => {
+test('download：浏览器+分享页都拿不到媒体流 → E_NO_MEDIA，提示手动保存，不落文件', async () => {
   const dlDir = makeTmpDir('download-nomedia')
   let fetched = 0
   const s = setup({
@@ -1279,7 +1279,8 @@ test('download：拿不到媒体流 → E_NO_MEDIA，提示手动保存，不调
   assert.equal(r.ok, false)
   assert.equal(r.code, 'E_NO_MEDIA')
   assert.match(r.message, /手动保存/)
-  assert.equal(fetched, 0)
+  // 2026-11-17 起浏览器取不到时会先试一次分享页兜底（ttwid 注册），但拿不到就照实报错
+  assert.ok(fetched >= 1, '应尝试过分享页兜底')
   assert.deepEqual(readdirSync(dlDir), [])
   cleanupDir(s.dir)
   cleanupDir(dlDir)
