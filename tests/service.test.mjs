@@ -803,7 +803,7 @@ test('enabled=false：所有工具 E_DISABLED（仍注册，便于排障）', as
     assert.equal(r.ok, false)
     assert.equal(r.code, 'E_DISABLED')
   }
-  assert.equal(s.registry.size, 20)
+  assert.equal(s.registry.size, 21)
   cleanupDir(s.dir)
 })
 

@@ -34,6 +34,7 @@ const TOOL_NAMES = [
   'dy_douyin_comment_reply',
   'dy_douyin_comment_delete',
   'dy_douyin_sms_code',
+  'dy_douyin_notify_watch',
   'dy_douyin_dm_list',
   'dy_douyin_dm_read',
   'dy_douyin_dm_send',
@@ -43,7 +44,7 @@ const TOOL_NAMES = [
   'dy_douyin_screenshot',
 ]
 
-test('注册 20 个工具：名字 / 参数 / 输出 schema 齐全', () => {
+test('注册 21 个工具：名字 / 参数 / 输出 schema 齐全', () => {
   const s = setup()
   assert.deepEqual([...s.registry.keys()].sort(), [...TOOL_NAMES].sort())
   for (const name of TOOL_NAMES) {
@@ -160,7 +161,7 @@ test('apply：远程不可用/缺 key 时正常加载并注册，调用返回 E_
     screenshotDir: join(dir, 'shots'),
   })
   assert.equal(ok, true)
-  assert.equal(registry.size, 20)
+  assert.equal(registry.size, 21)
   assert.equal(existsSync(join(dir, 'audit.jsonl')), false)
 
   const res = await registry.get('dy_douyin_status').execute({}, ownerExec())
@@ -177,7 +178,7 @@ test('apply：损坏/空配置不抛；ctx 为空也不把宿主带崩', () => {
 
   const { ctx, registry } = makeCtx()
   assert.equal(apply(ctx, { sshKeyPath: '/nonexistent/key', knownHosts: '/nonexistent/kh', auditFile: '/tmp/x-audit.jsonl' }), true)
-  assert.equal(registry.size, 20)
+  assert.equal(registry.size, 21)
 })
 
 test('apply：exposeService 默认关闭；显式 true 时 provide dyDouyin', () => {
