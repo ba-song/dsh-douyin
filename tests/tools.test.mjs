@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { apply, createRuntime } from '../lib/index.js'
-import { registerTools } from '../lib/tools.js'
+import { contextAccess, isChannelToolAllowed, registerTools } from '../lib/tools.js'
 import {
   cleanupDir,
   detailOf,
@@ -33,6 +33,7 @@ const TOOL_NAMES = [
   'dy_douyin_comment',
   'dy_douyin_comment_reply',
   'dy_douyin_comment_delete',
+  'dy_douyin_sms_code',
   'dy_douyin_dm_list',
   'dy_douyin_dm_read',
   'dy_douyin_dm_send',
@@ -42,7 +43,7 @@ const TOOL_NAMES = [
   'dy_douyin_screenshot',
 ]
 
-test('注册 19 个工具：名字 / 参数 / 输出 schema 齐全', () => {
+test('注册 20 个工具：名字 / 参数 / 输出 schema 齐全', () => {
   const s = setup()
   assert.deepEqual([...s.registry.keys()].sort(), [...TOOL_NAMES].sort())
   for (const name of TOOL_NAMES) {
@@ -159,7 +160,7 @@ test('apply：远程不可用/缺 key 时正常加载并注册，调用返回 E_
     screenshotDir: join(dir, 'shots'),
   })
   assert.equal(ok, true)
-  assert.equal(registry.size, 19)
+  assert.equal(registry.size, 20)
   assert.equal(existsSync(join(dir, 'audit.jsonl')), false)
 
   const res = await registry.get('dy_douyin_status').execute({}, ownerExec())
@@ -176,7 +177,7 @@ test('apply：损坏/空配置不抛；ctx 为空也不把宿主带崩', () => {
 
   const { ctx, registry } = makeCtx()
   assert.equal(apply(ctx, { sshKeyPath: '/nonexistent/key', knownHosts: '/nonexistent/kh', auditFile: '/tmp/x-audit.jsonl' }), true)
-  assert.equal(registry.size, 19)
+  assert.equal(registry.size, 20)
 })
 
 test('apply：exposeService 默认关闭；显式 true 时 provide dyDouyin', () => {
@@ -461,4 +462,26 @@ test('dy_douyin_dm_watch 工具：owner 门禁 + poll 基线 + 暴露服务方�
   assert.equal(typeof s.runtime.service.dmWatchStatus, 'function')
   assert.equal(typeof s.runtime.service.dmPollConversations, 'function')
   cleanupDir(s.dir)
+})
+
+test('渠道访问级别：抖音渠道 cwd 拿到 channel，只放白名单工具；点赞/评论仍拒', () => {
+  const s = setup()
+  const channelExec = { agent: { session: { id: 'ch-1', header: { cwd: '/sdcard/DSHA/渠道/douyin' } } } }
+  assert.equal(contextAccess(null, channelExec, s.runtime.cfg), 'channel')
+  assert.equal(isChannelToolAllowed('dy_douyin_dm_send', s.runtime.cfg), true)
+  assert.equal(isChannelToolAllowed('dy_douyin_dm_read', s.runtime.cfg), true)
+  assert.equal(isChannelToolAllowed('dy_douyin_notify_list', s.runtime.cfg), true)
+  assert.equal(isChannelToolAllowed('dy_douyin_like', s.runtime.cfg), false, '点赞不在渠道白名单')
+  assert.equal(isChannelToolAllowed('dy_douyin_comment', s.runtime.cfg), false, '评论不在渠道白名单')
+  // 渠道会话调用白名单工具：放行到服务层；不在白名单：E_PERMISSION
+  const dmList = s.registry.get('dy_douyin_dm_list')
+  const like = s.registry.get('dy_douyin_like')
+  return (async () => {
+    const denied = await like.execute({ videoId: '123456789' }, channelExec)
+    assert.equal(denied.ok, false)
+    const d = detailOf(denied)
+    assert.equal(d.code, 'E_PERMISSION')
+    assert.match(d.message, /渠道会话/)
+    cleanupDir(s.dir)
+  })()
 })
