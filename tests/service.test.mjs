@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PNG, cleanupDir, detailOf, makeClock, makeFakeMemory, makeMp4, makeTmpDir, setup } from './helpers.mjs'
-import { detectToggleActive, dmConversationId, dmPreviewText, parseModalId, parseNotifyItems, parseVideoIdFromUrl, parseVideoItems, pickNotifyTarget, TOGGLE_STATE_ATTR } from '../lib/service.js'
+import { detectToggleActive, dmConversationId, dmPreviewText, parseDmConversationRows, parseModalId, parseNotifyItems, parseVideoIdFromUrl, parseVideoItems, pickNotifyTarget, TOGGLE_STATE_ATTR } from '../lib/service.js'
 
 test('dmPreviewText：预览剥掉「我：」前缀（全角/半角），用于识别自己发的私信', () => {
   assert.equal(dmPreviewText('我：晚安'), '晚安')
@@ -12,6 +12,23 @@ test('dmPreviewText：预览剥掉「我：」前缀（全角/半角），用于
   assert.equal(dmPreviewText('晚安'), '晚安')
   assert.equal(dmPreviewText('  我：  多  空格  '), '多 空格')
   assert.equal(dmPreviewText(null), '')
+})
+
+test('parseDmConversationRows：一次 list 的 innerText 解析成 名称/时间/预览', () => {
+  const rows = [
+    { text: '饲养员\n00:13\n在的，试试这次能不能发出去。' },
+    { text: '01\n10/30\n我是大肥鱼' },
+    { text: '流浪的小猫\n刚刚\n[比心]' },
+    { text: '多行预览\n12:01\n第一行\n第二行' },
+  ]
+  const out = parseDmConversationRows(rows)
+  assert.deepEqual(out[0], { name: '饲养员', preview: '在的，试试这次能不能发出去。', time: '00:13' })
+  assert.deepEqual(out[1], { name: '01', preview: '我是大肥鱼', time: '10/30' })
+  assert.deepEqual(out[2], { name: '流浪的小猫', preview: '[比心]', time: '刚刚' })
+  assert.deepEqual(out[3], { name: '多行预览', preview: '第一行 第二行', time: '12:01' })
+  // 只有名称（行数 < 2）→ 返回 null，调用方回退老路径
+  assert.equal(parseDmConversationRows([{ text: '只有名字' }]), null)
+  assert.equal(parseDmConversationRows([]), null)
 })
 
 test('parseModalId：从 URL 查询/哈希中取 6–20 位 modal_id', () => {
