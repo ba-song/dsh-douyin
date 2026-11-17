@@ -282,8 +282,9 @@ ssh -i /root/.dsh/douyin/ssh/id_ed25519 -p 2222 \
 - `quality` 只做参数校验（`best/source/720p/1080p/540p`）；当前取页面首个 source（通常最高码率），
   不保证与请求分辨率一致。
 - 媒体来源：优先远程 `html video` 的 `<source src>`（HTML 实体反解、只允许抖音媒体域名 https），
-  取不到再回退 `list video source`；再取不到 → 走 **ttwid + iesdouyin 分享页 SSR 兜底**
-  （纯 HTTP，不依赖远程浏览器；见 `lib/sharepage.js`）；全失败才 `E_NO_MEDIA`。
+  取不到再回退 `list video source`；**桥整个挂了/页面是 JS 壳/选择器变了** → 走
+  **ttwid + iesdouyin 分享页 SSR 兜底**（纯 HTTP，不依赖远程浏览器；见 `lib/sharepage.js`）；
+  全失败才 `E_NO_MEDIA`。风控/登录墙（`E_CHALLENGE`/`E_LOGIN_REQUIRED`）仍然硬停，不绕。
 - 图集（`/note/<id>`）：页面没有视频流，作品图在 `img[src*="aweme-images"]`（实测命中 4 张），
   按 `douyinpic.com` 域名白名单 + 文件头认格式落成 `<videoId>-01.webp` 等；sidecar `kind='gallery'`。
 - `url` 参数可以直接是整段分享文案（`extractDouyinUrlFromText` 只认抖音域名，不会把别人的链接当抖音链接）。

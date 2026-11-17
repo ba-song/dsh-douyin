@@ -195,3 +195,47 @@ test('service.download：浏览器拿不到直链时用分享页兜底落盘，�
   cleanupDir(dir)
   resetTtwidCache()
 })
+
+test('service.download：桥整个挂掉时也能用分享页兜底（不抛 E_BRIDGE_DOWN）', async () => {
+  resetTtwidCache()
+  const dir = makeTmpDir('bridgedown')
+  const mp4 = Buffer.from([0, 0, 0, 16, ...Buffer.from('ftypisom'), 0, 0, 2, 0])
+  const fetchImpl = async (url) => {
+    const u = String(url)
+    if (u.includes('ttwid.bytedance.com')) return ttwidResponse()
+    if (u.includes('iesdouyin.com')) return { ok: true, status: 200, text: async () => shareHtml(VIDEO_ITEM) }
+    return new Response(mp4, { status: 200 })
+  }
+  const s = setup({
+    rawConfig: { downloadDir: dir },
+    fetchImpl,
+    handlers: {
+      // 模拟 SSH/桥不可用：所有桥命令都抛
+      url: () => {
+        throw new Error('ssh: connect to host 127.0.0.1 port 2222: Connection refused')
+      },
+      open: () => {
+        throw new Error('E_BRIDGE_DOWN')
+      },
+      title: () => {
+        throw new Error('E_BRIDGE_DOWN')
+      },
+      html: () => {
+        throw new Error('E_BRIDGE_DOWN')
+      },
+      text: () => {
+        throw new Error('E_BRIDGE_DOWN')
+      },
+      list: () => {
+        throw new Error('E_BRIDGE_DOWN')
+      },
+    },
+  })
+  const r = await s.runtime.service.download({ videoId: '7436613508646702348' })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.equal(r.mediaSource, 'share-page')
+  assert.ok(r.bytes > 0)
+  cleanupDir(s.dir)
+  cleanupDir(dir)
+  resetTtwidCache()
+})
