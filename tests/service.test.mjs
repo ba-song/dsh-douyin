@@ -555,11 +555,17 @@ test('open：videoId/url 白名单；非法域名/协议/路径 → E_BAD_URL；
   assert.equal(byUrl.ok, true)
   assert.equal(byUrl.videoId, '123456789')
 
+  // 2026-11-17：/note/<id>（图文/图集）不再是非法地址，单独正向断言
+  const byNote = await s.runtime.service.open({ url: 'https://www.douyin.com/note/123456789' })
+  assert.equal(byNote.ok, true)
+  assert.equal(byNote.videoId, '123456789')
+  assert.equal(byNote.url, 'https://www.douyin.com/note/123456789')
+
   const bad = [
     { url: 'https://www.douyin.com.evil.com/video/123456789' },
     { url: 'http://www.douyin.com/video/123456789' },
     { url: 'https://www.douyin.com/video/abc' },
-    { url: 'https://www.douyin.com/note/123456789' },
+    { url: 'https://www.douyin.com/note/abc' },
   ]
   for (const args of bad) {
     const r = await s.runtime.service.open(args)
