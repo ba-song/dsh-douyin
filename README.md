@@ -26,7 +26,7 @@
 | `dy_douyin_comments({videoId,limit=20})` | 打开视频页读评论；最多点 20 个 `button.comment-reply-expand-btn` 展开回复后重新 list 合并（点失败跳过）；每条带 `time`（刚刚/N分钟前/N小时前/日期） | `{ok,videoId,items:[{author,text,likes,time,replyCount,replies[]}],count}` |
 | `dy_douyin_notify_list({limit=20,loadMore=true})` | **只读**读「通知/互动消息」（固定 notify tab，不碰 main）：点「通知」开面板，解析 @提及/回复评论/赞/弹幕/关注；每条带稳定 `id`/`index`/`isOwner`/`replyable`，另有 `rawCount`（面板 DOM 行数，含系统提示/加载更多）；`loadMore` 会自动点「点击加载更多」最多 3 次。不点条目（不标已读、不跳视频）、不回复；关闭面板：Escape → 页面空白处真实点击（真机实测 Escape 不关浮层）→ 入口兜底，**不点搜索框/条目** | `{ok,panel,filter,items:[{id,index,actor,relation,type,text,time,ageMs,likeCount,isOwner,replyable,...}],count,loaded,reply}` |
 | `dy_douyin_notify_reply({id?,target?,text,confirm,index?,commentTarget?})` | **写操作**回复一条通知：只支持 mention/comment_reply；按 `id`/`index`/`target` 精确定位（id 与 target/index 不一致 `E_BAD_ARG`；只给 target 且多条 `E_AMBIGUOUS`）→ 在 notify tab 点开条目（**标记已读**）→ URL 取 videoId → 同一个 notify tab 评论区回复（owner 默认显示名草荧，失败回退备注名）→ 评论列表回读判 verified；回复完 notify tab 回首页，main 不动。`confirm:true` 必须；like/follow `E_NOT_REPLYABLE`（不点）；时间只有日期/星期或超 1h `E_STALE`（不点）；找不到 `E_NOT_FOUND`；不自动/不批量 | `{ok,action:'notify_reply',videoId,notification,replyTarget,usedAltTarget,verified,markedRead:true,note}` |
-| `dy_douyin_download({videoId?,url?,quality?})` | **只有她明确要求才调用，绝不自动下载 feed**；打开视频页→`html video` 取 `<source src>`→本地 fetch 存 `.../<videoId>.mp4`；≤300MB；**只保存文件和 sidecar，不写观看记忆** | `{ok,videoId,file,bytes,seconds,title?,author}` |
+| `dy_douyin_download({videoId?,url?,quality?})` | **只有她明确要求才调用，绝不自动下载 feed**；打开作品页→`html video` 取 `<source src>`→本地 fetch 存 `.../<videoId>.mp4`；`/note/<id>` 图文落 `<videoId>-NN.jpg/webp`；浏览器取不到时退 `ttwid+iesdouyin 分享页` 兜底；`url` 可贴整段分享文案；≤300MB；**只保存文件和 sidecar，不写观看记忆** | `{ok,videoId,kind,file,bytes,seconds,title?,author,mediaSource}`（图集另带 `files/count`） |
 | `dy_douyin_watch({videoId?,path?,thought?,summary?,note?})` | 看完后从 sidecar 取 title/author/file，写一条 `dyMemory.addEpisode`（source=`douyin_watch`）；同 videoId 幂等；失败只 warn | `{ok,videoId,file,title,author,memoryWritten,memoryId?,duplicate?}` |
 | `dy_douyin_like({videoId,undo?,confirm?,dryRun?,inputMode?})` | 点赞/取消，selector `[data-e2e="video-player-digg"]`；dryRun 只读；真实写 confirm:true；`inputMode=auto/click/key`（auto 点击失败回退键盘 Z）；回读 `data-e2e-state`（`is-digged`/`no-digged`） | `{ok,action,videoId,targetState,before,after,verified,via,code?}` |
 | `dy_douyin_favorite({videoId,undo?,confirm?,dryRun?,inputMode?})` | 收藏/取消，selector `[data-e2e="video-player-collect"]`；`inputMode=auto/click/key`（auto 回退键盘 C）；回读 `data-e2e-state`（`is-collected`/`no-collect`），同上 | 同上 |
@@ -282,7 +282,13 @@ ssh -i /root/.dsh/douyin/ssh/id_ed25519 -p 2222 \
 - `quality` 只做参数校验（`best/source/720p/1080p/540p`）；当前取页面首个 source（通常最高码率），
   不保证与请求分辨率一致。
 - 媒体来源：优先远程 `html video` 的 `<source src>`（HTML 实体反解、只允许抖音媒体域名 https），
-  取不到再回退 `list video source`；仍无 → `E_NO_MEDIA`，提示主人手动保存，不绕路。
+  取不到再回退 `list video source`；再取不到 → 走 **ttwid + iesdouyin 分享页 SSR 兜底**
+  （纯 HTTP，不依赖远程浏览器；见 `lib/sharepage.js`）；全失败才 `E_NO_MEDIA`。
+- 图集（`/note/<id>`）：页面没有视频流，作品图在 `img[src*="aweme-images"]`（实测命中 4 张），
+  按 `douyinpic.com` 域名白名单 + 文件头认格式落成 `<videoId>-01.webp` 等；sidecar `kind='gallery'`。
+- `url` 参数可以直接是整段分享文案（`extractDouyinUrlFromText` 只认抖音域名，不会把别人的链接当抖音链接）。
+- `/playwm/`→`/play/` 只做地址兼容，**不承诺去水印**：2026-11-17 实测同一作品两个地址跟随后
+  193,706,356 字节、sha256 完全一致（`de5e38…`）。
 - 本地 `fetch` 流式写入临时文件，校验 MP4 后 rename；单文件 300MB 上限、10 分钟超时、失败清理 tmp。
 - 下载成功写 sidecar `.../<videoId>.json`：`videoId/title/author/file/bytes/seconds/downloadedAt`；
   **download 不写观看记忆**，避免把“打开下载”误当“看完”。
@@ -446,3 +452,34 @@ bash /root/.dsh/plugin-src/dsh-douyin/bridge/restart.sh   # 见 bridge-report.md
 ### 新增配置
 `channelCwds`、`channelToolAllowlist`、`riskNotifyEnabled`、`ownerQqId`、`riskNotifyMinGapMs`、
 `riskNotifyEmail`、`riskNotifyChannel`。
+
+## 2026-11-17 下载升级（参考 dsh-link-parse / dsh-douyin-video 的评估结论）
+
+主人问："dsh-link-parse 能读抖音短链接吗？能不能直接用/要适配吗？dsh-douyin-video 能绕过
+作者不开放下载吗？能不能参考它更新我们自己的下载插件？"
+
+### 实测结论（2026-11-17，出口 39.182.189.206 上海移动；证据在 `/tmp/probe-parse/REPORT.md`）
+
+| 项目 | 结论 | 关键证据 |
+| --- | --- | --- |
+| `dsh-link-parse@0.1.0`（npm，DSH 0.2.x 兼容） | **装上去也读不了抖音**：它的分享页请求不带 `ttwid`，只能拿到 32KB 占位对象 | 直接跑它的 `parseLink()`：两条真实链接都返回 `note:"抖音分享页 item_list 为空"`；源码 `grep ttwid` = 0 命中 |
+| 它缺的那一步 | iphone UA **+ ttwid 注册**（`ttwid.bytedance.com/ttwid/union/register/`） | 加 ttwid 后同页 40,259B，`videoInfoRes.item_list_len=1`，`play_addr.uri=v0300fg…`（两个独立 ttwid 都复现） |
+| `wlq6dfup20090104/dsh-douyin-video`（GitHub） | **能用**，但靠第三方：主通道 `api.xingzhige.com` 已挂（9 种传参全 -404），回落 `api.douyin.wtf`（公共 demo 账号）可用 | 跑它的 `parseDouyin()`：`source=douyin.wtf`、4.5s、`watermark=false`、标题/作者正确 |
+| "绕过作者不开放下载" | **不是黑科技**：它的做法就是把播放流拉下来，我们也一样 | 真实视频页 `[data-e2e*=download]` 计数 = 0（页面没有下载入口），照样拉到完整 2,074,008B MP4，抽帧无抖音叠加水印；我们的 `download()` 从不检查 `allow_download`（全仓 grep = 0） |
+
+### 采纳
+
+1. **分享文案 → 链接**（`extractDouyinUrlFromText`）：整段"复制打开抖音…"可直接作为 `url`。
+2. **图集（`/note/<id>`）**：这是参考实现真正补上的空缺——我们以前直接 `E_BAD_URL`。
+3. **ttwid + 分享页 SSR 兜底**（`lib/sharepage.js`）：纯 HTTP，远程桥不可用也能下；
+   实测 675ms 拿 ttwid、855ms 拿 item、2.5MB 视频 4.5s 下完。
+4. `/playwm/`→`/play/` 只保留为地址兼容（见上，**不是**去水印手段）。
+
+### 不采纳
+
+- **不装 `dsh-link-parse`**：抖音路径必失败；它的 `link_download` 会把文件写到它自己的 `mediaDir`，
+  与我们 `downloadDir` + sidecar + 观看记忆两套账；且插件注册要改 profile，按守则必须主人点头。
+- **不接 `api.xingzhige.com` / `api.douyin.wtf`**：前者已挂；后者要把主人贴的链接发给第三方、
+  用别人的公共 demo 账号（cookie 7 天）、无 SLA，还拿到 `size_bytes=359MB` 这种超大文件。
+  我们自己的 ttwid 通道完全在本机完成，没这个依赖。
+- **不抄它 `mapWtf()` 的图集判定**：它对 `kind !== 'video'` 直接判失败，本身不支持图集。
