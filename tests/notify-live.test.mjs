@@ -6,7 +6,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
-import { cleanupDir, setup } from './helpers.mjs'
+import { cleanupDir, makeClock, setup } from './helpers.mjs'
 
 const ENTRY = 'header [data-e2e="something-button"]:has-text("通知")'
 const PANEL = '[data-e2e="listDlgTest-container"]'
@@ -20,6 +20,7 @@ const ROWS = [
 ]
 
 function makeFixture({ firstUrl = 'https://www.douyin.com/jingxuan', panelOpen = false, escapeCloses = true } = {}) {
+  const clock = makeClock()
   let open = panelOpen
   let url = firstUrl
   let badgeCount = 0
@@ -27,6 +28,7 @@ function makeFixture({ firstUrl = 'https://www.douyin.com/jingxuan', panelOpen =
   const clicks = []
   const presses = []
   const s = setup({
+    clock,
     rawConfig: {
       notifyWatchBadgeSelectors: [ENTRY],
       dmOwnerAliases: ['饲养员', '草荧'],
@@ -82,7 +84,9 @@ function makeFixture({ firstUrl = 'https://www.douyin.com/jingxuan', panelOpen =
     get open() { return open },
     setOpen: (v) => { open = v },
     setBadge: (n) => { badgeCount = n },
-    addRow: (text) => { rows.splice(Math.max(0, rows.length - 1), 0, { text }) },
+    clock,
+    // 新通知在"1 分钟后"到达（est 与基线不同），否则同一时钟下会被当成同一条（真实场景不会同毫秒）
+    addRow: (text) => { clock.advance(60000); rows.splice(Math.max(0, rows.length - 1), 0, { text }) },
     clicks,
     presses,
     setUrl: (u) => { url = u },
