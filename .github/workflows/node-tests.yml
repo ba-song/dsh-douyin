@@ -1,0 +1,19 @@
+name: Node checks and tests
+on:
+  push:
+    branches: ["ci/exact-head-tests-20261124"]
+  pull_request:
+    branches: ["main"]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+      - run: npm run check
+      - run: npm install --ignore-scripts --no-audit --no-fund --package-lock=false --no-save @deepseek-ai/schemastery yaml
+      - run: sudo mkdir -p /persistent/pw/node_modules && sudo npm install --prefix /persistent/pw --ignore-scripts --no-audit --no-fund --package-lock=false --no-save playwright
+      - run: npm test
