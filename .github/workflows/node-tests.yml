@@ -15,5 +15,5 @@ jobs:
       - run: npm install --ignore-scripts --no-audit --no-fund --package-lock=false
       - run: npm run check
       - run: npm install --ignore-scripts --no-audit --no-fund --package-lock=false --no-save @deepseek-ai/schemastery yaml
-      - run: mkdir -p /persistent/pw/node_modules && npm install --prefix /persistent/pw --ignore-scripts --no-audit --no-fund --package-lock=false --no-save playwright
+      - run: sudo mkdir -p /persistent/pw/node_modules && sudo npm install --prefix /persistent/pw --ignore-scripts --no-audit --no-fund --package-lock=false --no-save playwright
       - run: npm test
