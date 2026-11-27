@@ -435,7 +435,7 @@ bash /root/.dsh/plugin-src/dsh-douyin/bridge/restart.sh   # 见 bridge-report.md
   - 通道：`dyChannel.sendText`（QQ，`mode=send` 才发）→ 失败自动回退 `dyMail.send`（邮件）；
   - 节流：`riskNotifyMinGapMs`（默认 10 分钟）内同一条通知只发一次；
   - 内容：场景 + 视频 id + 明确说明「不绕过验证，请把验证码回给汐，她用 `dy_douyin_sms_code` 填入」。
-  - 配置：`riskNotifyEnabled`（默认 true）、`ownerQqId`（默认 2971030080）、`riskNotifyChannel`（qq/email/both）、`riskNotifyEmail`。
+  - 配置：`riskNotifyEnabled`（默认 true）、`ownerQqId`（默认留空；请在本地私有配置中设置）、`riskNotifyChannel`（qq/email/both）、`riskNotifyEmail`。
 - **填入验证码**：新工具 `dy_douyin_sms_code({code, confirm:true})`
   - 只在"当前确实有验证面板"时工作（否则 `E_NOT_FOUND`）；
   - 找输入框（`[class*="verify_sms"] input` 等白名单）→ 桥内 `type` 填码 → 点「验证」→ 轮询面板消失；
@@ -459,7 +459,7 @@ bash /root/.dsh/plugin-src/dsh-douyin/bridge/restart.sh   # 见 bridge-report.md
 主人问："dsh-link-parse 能读抖音短链接吗？能不能直接用/要适配吗？dsh-douyin-video 能绕过
 作者不开放下载吗？能不能参考它更新我们自己的下载插件？"
 
-### 实测结论（2026-11-17，出口 39.182.189.206 上海移动；证据在 `/tmp/probe-parse/REPORT.md`）
+### 实测结论（2026-11-17，出口 IP 与本地证据路径已脱敏；原始证据仅保留在本地环境）
 
 | 项目 | 结论 | 关键证据 |
 | --- | --- | --- |
